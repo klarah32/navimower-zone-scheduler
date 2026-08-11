@@ -41,6 +41,7 @@ async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
     installed, before any mower has even been added via the config flow.
     """
     async_register_services(hass)
+    await _async_register_card(hass)
     return True
 
 
@@ -84,7 +85,6 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    await _async_register_card(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
