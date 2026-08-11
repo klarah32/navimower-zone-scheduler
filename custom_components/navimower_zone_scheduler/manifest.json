@@ -4,6 +4,12 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["http", "frontend"],
+  "resources": [
+    {
+      "type": "module",
+      "url": "/navimower_zone_scheduler_static/navimow-zone-interval-card.js"
+    }
+  ],
   "documentation": "https://github.com/yourname/navimower-zone-scheduler",
   "integration_type": "hub",
   "iot_class": "local_push",
