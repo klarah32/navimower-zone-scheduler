@@ -1,0 +1,145 @@
+mow_due_zones:
+  name: Mow due zones now
+  description: >-
+    Calculate today's due zones for a NaviMower Zone Scheduler schedule and
+    start mowing only those zones. Zones with interval 0 are ignored.
+  fields:
+    schedule_entity:
+      name: Schedule entity
+      description: The mower's Schedule sensor, for example sensor.gerd_schedule.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    device_id:
+      name: Mower
+      description: The mower to mow.
+      required: true
+      selector:
+        device:
+          filter:
+            integration: navimower
+    reset:
+      name: Reset
+      description: Pass reset to navimower.mow. Normally false.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+save_due_schedule:
+  name: Save due schedule (next N days)
+  description: >-
+    Simulate which zones are due on each of the next N days (starting
+    tomorrow, since today is better handled by "Mow due zones now") and
+    write navimower.set_schedule for exactly those weekdays. Days with
+    nothing due are left completely untouched. Since set_schedule
+    overwrites a weekday's whole plan, only call this from an automation
+    you're confident should own that weekday's schedule. A zone due today
+    that hasn't actually been mowed yet today automatically carries into
+    tomorrow's saved schedule too, as a safety net.
+  fields:
+    schedule_entity:
+      name: Schedule entity
+      description: The mower's Schedule sensor, for example sensor.gerd_schedule.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    device_id:
+      name: Mower
+      description: The mower to schedule.
+      required: true
+      selector:
+        device:
+          filter:
+            integration: navimower
+    start:
+      name: Start time
+      description: >-
+        Mow window start. Pick a preset or type your own: a fixed time
+        (HH:MM, must land on a 15-minute mark) or a sun-relative spec --
+        "sunrise", "sunset", or an offset in minutes such as "sunrise+30"
+        / "sunset-45". Sun-relative times are resolved separately for
+        each day being saved and snapped to the nearest 15-minute mark.
+      required: true
+      example: "sunrise-30"
+      selector:
+        select:
+          mode: dropdown
+          custom_value: true
+          options:
+            - value: "sunrise-30"
+              label: Sunrise - 30 min
+            - value: "sunrise-15"
+              label: Sunrise - 15 min
+            - value: "sunrise"
+              label: Sunrise
+            - value: "sunrise+15"
+              label: Sunrise + 15 min
+            - value: "sunrise+30"
+              label: Sunrise + 30 min
+            - value: "sunrise+45"
+              label: Sunrise + 45 min
+            - value: "sunrise+60"
+              label: Sunrise + 1 hour
+            - value: "06:00"
+              label: "06:00"
+            - value: "07:00"
+              label: "07:00"
+            - value: "08:00"
+              label: "08:00"
+            - value: "09:00"
+              label: "09:00"
+            - value: "10:00"
+              label: "10:00"
+    end:
+      name: End time
+      description: >-
+        Mow window end. Pick a preset or type your own: a fixed time
+        (HH:MM, must land on a 15-minute mark) or a sun-relative spec --
+        "sunrise", "sunset", or an offset in minutes such as "sunrise+30"
+        / "sunset-45". Sun-relative times are resolved separately for
+        each day being saved and snapped to the nearest 15-minute mark.
+      required: true
+      example: "sunset+30"
+      selector:
+        select:
+          mode: dropdown
+          custom_value: true
+          options:
+            - value: "18:00"
+              label: "18:00"
+            - value: "19:00"
+              label: "19:00"
+            - value: "20:00"
+              label: "20:00"
+            - value: "21:00"
+              label: "21:00"
+            - value: "22:00"
+              label: "22:00"
+            - value: "sunset-60"
+              label: Sunset - 1 hour
+            - value: "sunset-45"
+              label: Sunset - 45 min
+            - value: "sunset-30"
+              label: Sunset - 30 min
+            - value: "sunset-15"
+              label: Sunset - 15 min
+            - value: "sunset"
+              label: Sunset
+            - value: "sunset+15"
+              label: Sunset + 15 min
+            - value: "sunset+30"
+              label: Sunset + 30 min
+    days:
+      name: Days ahead
+      description: How many days ahead to simulate and save, starting tomorrow (1-7).
+      required: false
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 7
+          step: 1
+          mode: box

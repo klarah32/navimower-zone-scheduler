@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Attach to a mower",
+        "description": "Pick the mower's \"Schedule\" sensor (e.g. sensor.gerd_schedule). One config entry = one mower.",
+        "data": {
+          "schedule_entity": "Schedule sensor"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "That entity was not found.",
+      "no_zones_attribute": "That entity has no 'zones' attribute -- pick the mower's Schedule sensor."
+    },
+    "abort": {
+      "already_configured": "This mower is already configured."
+    }
+  }
+}
