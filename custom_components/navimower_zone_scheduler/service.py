@@ -414,6 +414,13 @@ async def _due_zone_details(hass: HomeAssistant, schedule_entity: str) -> dict[s
         "zone_ids": due_ids,
         "zone_names": [z["name"] for z in due_zones],
         "due_zones": due_zones,
+        # Diagnostics make it obvious whether the issue is schedule,
+        # interval discovery, or completion discovery.
+        "schedule_zone_count": len(zones),
+        "interval_zone_count": len(intervals),
+        "completed_zone_count": sum(
+            1 for value in last_completed.values() if value is not None
+        ),
     }
 
 

@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "1.3.12"
+const CARD_VERSION = "1.3.13"
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {

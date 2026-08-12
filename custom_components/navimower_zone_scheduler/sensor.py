@@ -124,10 +124,13 @@ class DueZonesSensor(SensorEntity):
             self._attr_native_value = len(due)
             self._attr_extra_state_attributes = {
                 "schedule_entity": self._schedule_entity,
-                "zone_names": [z["name"] for z in due],
-                "zone_ids": [z["id"] for z in due],
+                "zone_names": details.get("zone_names", []),
+                "zone_ids": details.get("zone_ids", []),
                 "due_zones": due,
-                "count": len(due),
+                "count": details.get("count", len(due)),
+                "schedule_zone_count": details.get("schedule_zone_count", 0),
+                "interval_zone_count": details.get("interval_zone_count", 0),
+                "completed_zone_count": details.get("completed_zone_count", 0),
                 "updated_at": dt_util.utcnow().isoformat(),
             }
             # This is a manually refreshed, non-polling entity. Without

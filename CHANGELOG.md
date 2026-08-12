@@ -1,3 +1,10 @@
+## 1.3.13
+- Make `get_due_zones` the canonical live calculation for automation responses.
+- Keep `sensor.*_mow_due_zones` as a presentation/cache of that same calculation.
+- Add schedule/interval/completion diagnostic counts to the due-zone response and sensor.
+- Preserve independent per-zone `number.*_mow_interval` entities.
+- Completion lookup remains based on mower prefix + `zone_name`, including `_2`/`_3` entity-ID suffixes.
+
 ## 1.3.12
 - Fix due-zone sensor setup by using `async_track_state_change_event`, the supported Home Assistant entity-state listener.
 - Restores setup of the independent per-zone mow-interval number entities alongside the due-zone sensor.
