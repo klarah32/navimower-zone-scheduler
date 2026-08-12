@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "1.3.6";
+const CARD_VERSION = "1.3.7";
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -327,42 +327,40 @@ class NavimowZoneIntervalCard extends HTMLElement {
    *  mowing activity, including a partial/interrupted pass) as the signal
    *  for how overdue a zone is. */
   _findLastCompleted(zoneId, zoneName = null) {
-    if (!this._hass) return null;
+    if (!this._hass || !this._config) return null;
     const states = this._hass.states;
-    const wantedName = zoneName == null ? null : String(zoneName).trim().toLocaleLowerCase();
+    const wantedName = zoneName == null ? "" : String(zoneName).trim().toLocaleLowerCase();
+    if (!wantedName) return null;
 
-    // 1) Current entity state: exact zone_id is the strongest match.
+    const schedulePrefix = String(this._config.entity || "")
+      .replace(/^sensor\./, "")
+      .replace(/_schedule$/, "");
+    const prefix = `sensor.${schedulePrefix}_`;
+    const completedPattern = /_last_completed(?:_\d+)?$/;
+
+    // Entity IDs are deliberately NOT linked by zone ID. Navimower can expose
+    // IDs such as sensor.eltern_zone_1_last_completed_3 after Home Assistant
+    // adds a collision suffix. The authoritative link is mower prefix +
+    // zone_name attribute.
+    let best = null;
+    let bestTs = -Infinity;
     for (const eid of Object.keys(states)) {
-      if (!eid.startsWith("sensor.") || !eid.endsWith("_last_completed")) continue;
+      if (!eid.startsWith(prefix) || !completedPattern.test(eid)) continue;
       const st = states[eid];
-      const zid = st.attributes && st.attributes.zone_id;
-      if (zid !== undefined && Number(zid) === Number(zoneId)) return st;
-    }
-
-    // 2) Zone IDs can change when a mower map is recreated. The integration
-    // keeps the zone name on the old *_last_completed entity, so use an exact
-    // name match as a safe fallback. This fixes cases such as Birnbaum where
-    // the schedule currently reports 2534 but the completion sensor still
-    // carries zone_id 28.
-    if (wantedName) {
-      for (const eid of Object.keys(states)) {
-        if (!eid.startsWith("sensor.") || !eid.endsWith("_last_completed")) continue;
-        const st = states[eid];
-        const name = st.attributes && st.attributes.zone_name;
-        if (name != null && String(name).trim().toLocaleLowerCase() === wantedName) {
-          return st;
-        }
+      const name = st.attributes && st.attributes.zone_name;
+      if (name == null || String(name).trim().toLocaleLowerCase() !== wantedName) continue;
+      if (["unknown", "unavailable", ""].includes(st.state)) continue;
+      const ts = Date.parse(st.state);
+      const score = Number.isFinite(ts) ? ts : -Infinity;
+      if (!best || score > bestTs) {
+        best = st;
+        bestTs = score;
       }
     }
+    if (best) return best;
 
-    // 3) A completion entity may be disabled/removed from hass.states while
-    // its Recorder history still exists. _completionHistory is populated
-    // asynchronously from the entity registry + Recorder and keyed by the
-    // current schedule zone id.
-    const historical = this._completionHistory && this._completionHistory[String(zoneId)];
-    if (historical) return historical;
-
-    return null;
+    // Recorder-only fallback populated by _loadCompletionHistory.
+    return this._completionHistoryByName?.[wantedName] || null;
   }
 
   _slugifyZoneName(value) {
@@ -385,45 +383,30 @@ class NavimowZoneIntervalCard extends HTMLElement {
       const entries = Array.isArray(registry && registry.entities) ? registry.entities : [];
       const scheduleEntry = entries.find((e) => e.entity_id === this._config.entity);
       const deviceId = scheduleEntry && scheduleEntry.device_id;
-
-      const candidates = new Map();
-      const norm = (value) => String(value == null ? "" : value).trim().toLocaleLowerCase();
       const schedulePrefix = String(this._config.entity || "")
         .replace(/^sensor\./, "")
         .replace(/_schedule$/, "");
+      const prefix = `sensor.${schedulePrefix}_`;
+      const completedPattern = /_last_completed(?:_\d+)?$/;
+      const norm = (value) => String(value == null ? "" : value).trim().toLocaleLowerCase();
 
+      // Discover ALL completion entities belonging to this mower first.
+      // Entity-ID collision suffixes such as _2/_3 are intentionally accepted.
+      const completionEntries = entries.filter((e) => {
+        if (!e || !e.entity_id || !e.entity_id.startsWith(prefix)) return false;
+        if (!completedPattern.test(e.entity_id)) return false;
+        if (deviceId && e.device_id && e.device_id !== deviceId) return false;
+        return true;
+      });
+
+      const candidates = new Map();
       for (const zone of zones) {
-        const zid = Number(zone.id);
-        if (!Number.isFinite(zid)) continue;
-        if (this._findLastCompleted(zid, zone.name)) continue;
-
         const wantedName = norm(zone.name);
-        const wantedUniqueSuffix = `_zone_${zid}_last_completed`;
-        const matches = entries.filter((e) => {
-          if (!e || !e.entity_id || !e.entity_id.startsWith("sensor.")) return false;
-          if (deviceId && e.device_id && e.device_id !== deviceId) return false;
-          const unique = String(e.unique_id || "");
-          const original = norm(e.original_name || e.name);
-          const byId = unique.endsWith(wantedUniqueSuffix);
-          const byName = wantedName && original === `${wantedName} last completed`;
-          return byId || byName;
-        }).map((e) => e.entity_id);
-
-        // Recorder history survives removal from the entity registry. In that
-        // case there is no registry entry left to discover. Add the entity IDs
-        // that the Navimow integration normally derives from the current mower
-        // name + zone name, plus the generic zone-name form. This is especially
-        // important after a zone/map recreation: the old completion entity can
-        // disappear from hass.states and the registry while its Recorder row
-        // remains available (e.g. sensor.eltern_mulltonnen_last_completed).
-        const slug = this._slugifyZoneName(zone.name);
-        if (slug) {
-          matches.push(`sensor.${schedulePrefix}_${slug}_last_completed`);
-          matches.push(`sensor.${slug}_last_completed`);
-        }
-
-        const uniqueMatches = [...new Set(matches)];
-        if (uniqueMatches.length) candidates.set(String(zid), uniqueMatches);
+        if (!wantedName) continue;
+        const matches = completionEntries
+          .filter((e) => norm(e.original_name || e.name) === `${wantedName} last completed`)
+          .map((e) => e.entity_id);
+        if (matches.length) candidates.set(wantedName, [...new Set(matches)]);
       }
 
       const entityIds = [...new Set([...candidates.values()].flat())];
@@ -441,28 +424,28 @@ class NavimowZoneIntervalCard extends HTMLElement {
         significant_changes_only: false,
       });
 
-      for (const [zoneId, ids] of candidates.entries()) {
+      for (const [zoneName, ids] of candidates.entries()) {
         let best = null;
+        let bestTs = -Infinity;
         for (const entityId of ids) {
           const rows = history && history[entityId];
           if (!Array.isArray(rows)) continue;
           for (const row of rows) {
             const value = row && row.state;
             if (!value || ["unknown", "unavailable"].includes(value)) continue;
-            const ts = row.last_changed || row.last_updated;
-            if (!ts) continue;
-            if (!best || new Date(ts).getTime() > new Date(best.state).getTime()) {
-              best = {
-                entity_id: entityId,
-                state: value,
-                attributes: { zone_id: Number(zoneId) },
-              };
-            }
+            const ts = Date.parse(row.last_changed || row.last_updated || value);
+            if (!Number.isFinite(ts) || ts <= bestTs) continue;
+            bestTs = ts;
+            best = {
+              entity_id: entityId,
+              state: value,
+              attributes: { zone_name: zoneName },
+            };
           }
         }
         if (best) {
-          this._completionHistory = this._completionHistory || {};
-          this._completionHistory[zoneId] = best;
+          this._completionHistoryByName = this._completionHistoryByName || {};
+          this._completionHistoryByName[zoneName] = best;
         }
       }
 

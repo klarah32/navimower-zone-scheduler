@@ -1,3 +1,13 @@
+## 1.3.8
+- Find all `*_last_completed*` sensors belonging to the configured mower first.
+- Link completion sensors to schedule zones by the sensor `zone_name`, not by numeric zone ID.
+- Accept Home Assistant collision suffixes such as `_2`, `_3`, etc.
+- Apply the same mower-prefix + zone-name logic to live states and Recorder history.
+
+## 1.3.7
+- Fix completion lookup for Navimower's stable `zone_<zone_id>_last_completed` entity IDs, including Recorder-only history.
+- This specifically fixes zones such as Mülltonnen when the completion entity is no longer present in `hass.states` or the entity registry.
+
 # Changelog
 
 ## 1.3.6

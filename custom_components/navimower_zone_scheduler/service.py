@@ -214,73 +214,67 @@ def _slugify_zone_name(value: Any) -> str:
 
 
 def _last_completed_state(
-    hass: HomeAssistant, zone_id: int, zone_name: str | None = None
+    hass: HomeAssistant, schedule_entity: str, zone_name: str | None = None
 ) -> Any | None:
-    """Find the best available last-completed source for a schedule zone.
+    """Find the mower's completion sensor by mower prefix + zone name.
 
-    Priority is: live entity with matching zone_id, live entity with matching
-    zone_name, then Recorder history for a Navimow zone completion entity.
-    The name fallback is intentional: a zone can be recreated in the mower
-    with a new numeric ID while its historical completion entity retains the
-    old ID. Recorder fallback also covers completion entities that are still
-    present in the entity registry/history but no longer loaded into
-    hass.states (e.g. disabled/removed after a map change).
+    Navimower can create entity IDs such as
+    ``sensor.eltern_zone_1_last_completed_3``. The numeric zone ID in that
+    entity ID is not a reliable link to the current schedule zone. The
+    reliable relationship is the mower prefix plus the sensor's ``zone_name``
+    attribute.
     """
     wanted_name = _norm_name(zone_name)
+    if not wanted_name:
+        return None
 
+    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
+    prefix = f"sensor.{schedule_prefix}_"
+    pattern = re.compile(r"_last_completed(?:_\d+)?$")
+
+    best = None
+    best_ts = float("-inf")
     for state in hass.states.async_all("sensor"):
-        if not state.entity_id.endswith("_last_completed"):
+        eid = state.entity_id
+        if not eid.startswith(prefix) or not pattern.search(eid):
             continue
-        attrs = state.attributes
-        try:
-            if int(attrs.get("zone_id")) == zone_id:
-                return state
-        except (TypeError, ValueError):
-            pass
+        if _norm_name(state.attributes.get("zone_name")) != wanted_name:
+            continue
+        value = str(state.state or "")
+        if value in ("unknown", "unavailable", ""):
+            continue
+        parsed = dt_util.parse_datetime(value)
+        ts = parsed.timestamp() if parsed is not None else float("-inf")
+        if best is None or ts > best_ts:
+            best = state
+            best_ts = ts
 
-    if wanted_name:
-        for state in hass.states.async_all("sensor"):
-            if not state.entity_id.endswith("_last_completed"):
-                continue
-            if _norm_name(state.attributes.get("zone_name")) == wanted_name:
-                return state
-
-    return None
+    return best
 
 
 def _registry_completion_entities(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
 ) -> list[str]:
-    """Return registry completion entities, including stale/disabled entries."""
+    """Find all registered completion sensors for this mower + zone name."""
     registry = er.async_get(hass)
     schedule_entry = registry.async_get(schedule_entity)
     device_id = schedule_entry.device_id if schedule_entry else None
     wanted_name = _norm_name(zone_name)
-    unique_suffix = f"_zone_{zone_id}_last_completed"
+    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
+    prefix = f"sensor.{schedule_prefix}_"
+    pattern = re.compile(r"_last_completed(?:_\d+)?$")
     result: list[str] = []
 
     for entry in registry.entities.values():
-        if entry.domain != "sensor":
+        if entry.domain != "sensor" or not entry.entity_id.startswith(prefix):
             continue
         if device_id and entry.device_id and entry.device_id != device_id:
             continue
-        unique_id = str(entry.unique_id or "")
-        original_name = _norm_name(entry.original_name or entry.name)
-        if unique_id.endswith(unique_suffix) or (
-            wanted_name and original_name == f"{wanted_name} last completed"
-        ):
+        if not pattern.search(entry.entity_id):
+            continue
+        original = _norm_name(entry.original_name or entry.name)
+        if wanted_name and original == f"{wanted_name} last completed":
             result.append(entry.entity_id)
-
-    # The entity may have been removed from the registry but its Recorder
-    # history can still exist. Navimow normally derives the entity ID from
-    # the mower/schedule prefix and the zone name, so include those candidates.
-    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
-    slug = _slugify_zone_name(zone_name)
-    if slug:
-        result.extend((
-            f"sensor.{schedule_prefix}_{slug}_last_completed",
-            f"sensor.{slug}_last_completed",
-        ))
 
     return list(dict.fromkeys(result))
 
@@ -311,7 +305,7 @@ async def _latest_completion(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
 ) -> date | None:
     """Return the latest completion date, including Recorder-only history."""
-    state = _last_completed_state(hass, zone_id, zone_name)
+    state = _last_completed_state(hass, schedule_entity, zone_name)
     if state is not None and state.state not in ("unknown", "unavailable", ""):
         parsed = dt_util.parse_datetime(state.state)
         if parsed is not None:
