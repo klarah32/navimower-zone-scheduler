@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "11";
+const CARD_VERSION = "12";
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -311,16 +311,129 @@ class NavimowZoneIntervalCard extends HTMLElement {
    *  Uses "completed" (full-coverage finish) rather than "mowed" (any
    *  mowing activity, including a partial/interrupted pass) as the signal
    *  for how overdue a zone is. */
-  _findLastCompleted(zoneId) {
+  _findLastCompleted(zoneId, zoneName = null) {
     if (!this._hass) return null;
     const states = this._hass.states;
+    const wantedName = zoneName == null ? null : String(zoneName).trim().toLocaleLowerCase();
+
+    // 1) Current entity state: exact zone_id is the strongest match.
     for (const eid of Object.keys(states)) {
       if (!eid.startsWith("sensor.") || !eid.endsWith("_last_completed")) continue;
       const st = states[eid];
       const zid = st.attributes && st.attributes.zone_id;
       if (zid !== undefined && Number(zid) === Number(zoneId)) return st;
     }
+
+    // 2) Zone IDs can change when a mower map is recreated. The integration
+    // keeps the zone name on the old *_last_completed entity, so use an exact
+    // name match as a safe fallback. This fixes cases such as Birnbaum where
+    // the schedule currently reports 2534 but the completion sensor still
+    // carries zone_id 28.
+    if (wantedName) {
+      for (const eid of Object.keys(states)) {
+        if (!eid.startsWith("sensor.") || !eid.endsWith("_last_completed")) continue;
+        const st = states[eid];
+        const name = st.attributes && st.attributes.zone_name;
+        if (name != null && String(name).trim().toLocaleLowerCase() === wantedName) {
+          return st;
+        }
+      }
+    }
+
+    // 3) A completion entity may be disabled/removed from hass.states while
+    // its Recorder history still exists. _completionHistory is populated
+    // asynchronously from the entity registry + Recorder and keyed by the
+    // current schedule zone id.
+    const historical = this._completionHistory && this._completionHistory[String(zoneId)];
+    if (historical) return historical;
+
     return null;
+  }
+
+  async _loadCompletionHistory(zones) {
+    if (!this._hass || !this._config || !this._hass.callWS || !Array.isArray(zones)) return;
+    const signature = zones.map((z) => `${z.id}:${z.name || ""}`).join("|");
+    if (signature === this._completionHistorySignature || this._completionHistoryLoading) return;
+    this._completionHistoryLoading = true;
+
+    try {
+      const registry = await this._hass.callWS({ type: "config/entity_registry/list" });
+      const entries = Array.isArray(registry && registry.entities) ? registry.entities : [];
+      const scheduleEntry = entries.find((e) => e.entity_id === this._config.entity);
+      const deviceId = scheduleEntry && scheduleEntry.device_id;
+
+      const candidates = new Map();
+      const norm = (value) => String(value == null ? "" : value).trim().toLocaleLowerCase();
+
+      for (const zone of zones) {
+        const zid = Number(zone.id);
+        if (!Number.isFinite(zid)) continue;
+        if (this._findLastCompleted(zid, zone.name)) continue;
+
+        const wantedName = norm(zone.name);
+        const wantedUniqueSuffix = `_zone_${zid}_last_completed`;
+        const matches = entries.filter((e) => {
+          if (!e || !e.entity_id || !e.entity_id.startsWith("sensor.")) return false;
+          // Keep disabled registry entries: Recorder can still contain the
+          // completion history even when the live entity is not in hass.states.
+          if (deviceId && e.device_id && e.device_id !== deviceId) return false;
+          const unique = String(e.unique_id || "");
+          const original = norm(e.original_name || e.name);
+          const byId = unique.endsWith(wantedUniqueSuffix);
+          const byName = wantedName && original === `${wantedName} last completed`;
+          return byId || byName;
+        });
+
+        if (matches.length) candidates.set(String(zid), matches.map((e) => e.entity_id));
+      }
+
+      const entityIds = [...new Set([...candidates.values()].flat())];
+      if (!entityIds.length) {
+        this._completionHistorySignature = signature;
+        return;
+      }
+
+      const start = new Date(Date.now() - 5 * 365 * 86400000).toISOString();
+      const history = await this._hass.callWS({
+        type: "history/history_during_period",
+        start_time: start,
+        entity_ids: entityIds,
+        minimal_response: false,
+        significant_changes_only: false,
+      });
+
+      for (const [zoneId, ids] of candidates.entries()) {
+        let best = null;
+        for (const entityId of ids) {
+          const rows = history && history[entityId];
+          if (!Array.isArray(rows)) continue;
+          for (const row of rows) {
+            const value = row && row.state;
+            if (!value || ["unknown", "unavailable"].includes(value)) continue;
+            const ts = row.last_changed || row.last_updated;
+            if (!ts) continue;
+            if (!best || new Date(ts).getTime() > new Date(best.state).getTime()) {
+              best = {
+                entity_id: entityId,
+                state: value,
+                attributes: { zone_id: Number(zoneId) },
+              };
+            }
+          }
+        }
+        if (best) {
+          this._completionHistory = this._completionHistory || {};
+          this._completionHistory[zoneId] = best;
+        }
+      }
+
+      this._completionHistorySignature = signature;
+      this._render();
+    } catch (err) {
+      console.warn("navimow-zone-interval-card: could not load completion history", err);
+    } finally {
+      this._completionHistoryLoading = false;
+    }
   }
 
   /** Find the "<zone> mow interval" number entity by its zone_id attribute,
@@ -381,7 +494,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
   }
 
   _rowHtml(z) {
-    const lm = this._findLastCompleted(z.id);
+    const lm = this._findLastCompleted(z.id, z.name);
     const age = this._fmtAge(lm);
     const intervalState = this._findInterval(z.id);
     const intervalDays = intervalState ? Number(intervalState.state) : 0;
@@ -439,7 +552,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
       const intervalState = this._findInterval(z.id);
       const intervalDays = intervalState ? Number(intervalState.state) : 0;
       if (!(intervalDays > 0)) return; // interval 0 (or missing) -> not considered
-      const lm = this._findLastCompleted(z.id);
+      const lm = this._findLastCompleted(z.id, z.name);
       let base = null;
       if (lm && !["unknown", "unavailable", ""].includes(lm.state)) {
         const d = new Date(lm.state);
@@ -617,6 +730,12 @@ class NavimowZoneIntervalCard extends HTMLElement {
       this._renderPreview();
       return;
     }
+
+    // Some Navimow completion entities can remain in Recorder/entity-registry
+    // history after the live entity is disabled/removed (for example after a
+    // zone was recreated). Load those historical timestamps asynchronously so
+    // the row can still say "today"/"4 days ago" instead of "never completed".
+    this._loadCompletionHistory(zones);
 
     // Don't rip a slider out from under an in-progress drag.
     const active = document.activeElement;

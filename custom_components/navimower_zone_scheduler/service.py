@@ -13,7 +13,9 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import sun as sun_helper
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
+from homeassistant.components.recorder import history as recorder_history
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -196,37 +198,102 @@ def _interval_days(hass: HomeAssistant, interval_entity: str) -> float | None:
         return None
 
 
-def _last_completed_state(hass: HomeAssistant, zone_id: int) -> Any | None:
-    """Find a "<zone> last completed" sensor by its zone_id attribute.
+def _norm_name(value: Any) -> str:
+    return str(value or "").strip().casefold()
 
-    REVIEWED against the card's _findLastCompleted(): the card matches any
-    sensor.*_last_completed entity purely by zone_id attribute, with no
-    assumption about the entity_id's prefix. This function used to instead
-    derive an expected "sensor.<mower>_" prefix from schedule_entity's own
-    object_id and require the completion sensor's entity_id to start with
-    it -- a fragile assumption to encode server-side when the card doesn't
-    need it at all, and any mismatch (e.g. a manually renamed entity_id)
-    silently dropped every completion date to "never", making every zone
-    look permanently overdue. Matching the card's exact strategy removes
-    that whole class of failure and keeps the two in lockstep.
 
-    Same cross-mower zone_id caveat as _interval_entity above applies here.
+def _last_completed_state(
+    hass: HomeAssistant, zone_id: int, zone_name: str | None = None
+) -> Any | None:
+    """Find the best available last-completed source for a schedule zone.
+
+    Priority is: live entity with matching zone_id, live entity with matching
+    zone_name, then Recorder history for a Navimow zone completion entity.
+    The name fallback is intentional: a zone can be recreated in the mower
+    with a new numeric ID while its historical completion entity retains the
+    old ID. Recorder fallback also covers completion entities that are still
+    present in the entity registry/history but no longer loaded into
+    hass.states (e.g. disabled/removed after a map change).
     """
+    wanted_name = _norm_name(zone_name)
+
     for state in hass.states.async_all("sensor"):
         if not state.entity_id.endswith("_last_completed"):
             continue
+        attrs = state.attributes
         try:
-            if int(state.attributes.get("zone_id")) != zone_id:
-                continue
+            if int(attrs.get("zone_id")) == zone_id:
+                return state
         except (TypeError, ValueError):
-            continue
-        return state
+            pass
+
+    if wanted_name:
+        for state in hass.states.async_all("sensor"):
+            if not state.entity_id.endswith("_last_completed"):
+                continue
+            if _norm_name(state.attributes.get("zone_name")) == wanted_name:
+                return state
+
     return None
 
 
-def _latest_completion(hass: HomeAssistant, zone_id: int) -> date | None:
-    """Return the completion date, or None if never completed."""
-    state = _last_completed_state(hass, zone_id)
+def _registry_completion_entity(
+    hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
+) -> str | None:
+    """Find a Navimow completion entity in the registry, even if not in states."""
+    registry = er.async_get(hass)
+    schedule_entry = registry.async_get(schedule_entity)
+    device_id = schedule_entry.device_id if schedule_entry else None
+    wanted_name = _norm_name(zone_name)
+    unique_suffix = f"_zone_{zone_id}_last_completed"
+
+    for entry in registry.entities.values():
+        if entry.domain != "sensor":
+            continue
+        # Keep disabled registry entries: their Recorder history can still
+        # contain the last completion even though they are absent from states.
+        if device_id and entry.device_id and entry.device_id != device_id:
+            continue
+        unique_id = str(entry.unique_id or "")
+        original_name = _norm_name(entry.original_name or entry.name)
+        if unique_id.endswith(unique_suffix):
+            return entry.entity_id
+        if wanted_name and original_name == f"{wanted_name} last completed":
+            return entry.entity_id
+    return None
+
+
+def _history_last_state(hass: HomeAssistant, entity_id: str) -> Any | None:
+    """Return the newest recorded non-unknown state for an entity."""
+    start = dt_util.now() - timedelta(days=5 * 365)
+    try:
+        rows = recorder_history.state_changes_during_period(
+            hass,
+            start,
+            entity_id=entity_id,
+            include_start_time_state=True,
+        )
+    except Exception:  # noqa: BLE001 - history is only a fallback
+        _LOGGER.debug("Recorder lookup failed for %s", entity_id, exc_info=True)
+        return None
+
+    states = rows.get(entity_id) or []
+    for state in reversed(states):
+        value = getattr(state, "state", None)
+        if value and value not in ("unknown", "unavailable", ""):
+            return state
+    return None
+
+
+async def _latest_completion(
+    hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
+) -> date | None:
+    """Return the latest completion date, including Recorder-only history."""
+    state = _last_completed_state(hass, zone_id, zone_name)
+    if state is None:
+        entity_id = _registry_completion_entity(hass, schedule_entity, zone_id, zone_name)
+        if entity_id:
+            state = await hass.async_add_executor_job(_history_last_state, hass, entity_id)
     if state is None or state.state in ("unknown", "unavailable", ""):
         return None
     parsed = dt_util.parse_datetime(state.state)
@@ -235,7 +302,7 @@ def _latest_completion(hass: HomeAssistant, zone_id: int) -> date | None:
     return dt_util.as_local(parsed).date()
 
 
-def _eligible_zones(
+async def _eligible_zones(
     hass: HomeAssistant, schedule_entity: str
 ) -> tuple[dict[int, int], dict[int, date], dict[int, date | None]]:
     """Collect zones with interval > 0, their next-due date, and last completion.
@@ -275,7 +342,7 @@ def _eligible_zones(
             continue
         interval_days = int(raw_days)
 
-        last_completed = _latest_completion(hass, zone_id)
+        last_completed = await _latest_completion(hass, schedule_entity, zone_id, row.get("name"))
         intervals[zone_id] = interval_days
         last_completed_by_zone[zone_id] = last_completed
         next_due[zone_id] = (
@@ -285,16 +352,16 @@ def _eligible_zones(
     return intervals, next_due, last_completed_by_zone
 
 
-def _due_zone_ids(hass: HomeAssistant, schedule_entity: str) -> list[int]:
+async def _due_zone_ids(hass: HomeAssistant, schedule_entity: str) -> list[int]:
     """Calculate today's due zones for one schedule sensor."""
     today = dt_util.now().date()
-    _intervals, next_due, _last_completed = _eligible_zones(hass, schedule_entity)
+    _intervals, next_due, _last_completed = await _eligible_zones(hass, schedule_entity)
     due = [zone_id for zone_id, due_date in next_due.items() if due_date <= today]
     # Defensive guarantee for navimower.mow: only positive integers leave here.
     return [zone_id for zone_id in due if isinstance(zone_id, int) and zone_id > 0]
 
 
-def _simulate_due_schedule(
+async def _simulate_due_schedule(
     hass: HomeAssistant, schedule_entity: str, days: int
 ) -> dict[date, list[int]]:
     """Simulate which zones would be due on each of the next `days` days.
@@ -316,7 +383,7 @@ def _simulate_due_schedule(
     the same result the card would show.
     """
     today = dt_util.now().date()
-    intervals, next_due, last_completed_by_zone = _eligible_zones(hass, schedule_entity)
+    intervals, next_due, last_completed_by_zone = await _eligible_zones(hass, schedule_entity)
 
     for zone_id, due_date in list(next_due.items()):
         if due_date <= today and last_completed_by_zone.get(zone_id) == today:
@@ -346,7 +413,7 @@ async def async_handle_mow_due_zones(hass: HomeAssistant, call: ServiceCall) -> 
     if not hass.services.has_service("navimower", "mow"):
         raise HomeAssistantError("The navimower.mow service is not available")
 
-    due_zones = _due_zone_ids(hass, schedule_entity)
+    due_zones = await _due_zone_ids(hass, schedule_entity)
     if not due_zones:
         _LOGGER.info("No due zones for %s", schedule_entity)
         return
@@ -392,7 +459,7 @@ async def async_handle_save_due_schedule(hass: HomeAssistant, call: ServiceCall)
     if not hass.services.has_service("navimower", "set_schedule"):
         raise HomeAssistantError("The navimower.set_schedule service is not available")
 
-    schedule_by_day = _simulate_due_schedule(hass, schedule_entity, days)
+    schedule_by_day = await _simulate_due_schedule(hass, schedule_entity, days)
     if not schedule_by_day:
         _LOGGER.info("No zones due in the next %s day(s) for %s", days, schedule_entity)
         return
