@@ -1,3 +1,11 @@
+## 1.3.11
+- Fix due-zone sensor publishing: explicitly writes updated state/attributes.
+- Refresh due-zone sensor immediately when schedule, interval, or last-completed entities change.
+
+## 1.3.10
+- Fix mow-interval discovery by matching `source_entity` + `zone_name` first, then `zone_name`, then `zone_id`.
+- Makes interval lookup robust to Home Assistant entity-ID renames/collision suffixes and keeps the card/backend aligned.
+
 ## 1.3.9
 - Add a per-mower `Mow due zones` sensor exposing the canonical due-zone list and metadata.
 - Add `navimower_zone_scheduler.get_due_zones`, a response-only service using the same calculation without mowing.

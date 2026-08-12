@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "1.3.9";
+const CARD_VERSION = "1.3.10"
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -468,30 +468,43 @@ class NavimowZoneIntervalCard extends HTMLElement {
    * entity state catches up to the override, the override is dropped here
    * automatically -- it never permanently masks the real state, it just
    * bridges the gap until the real update arrives. */
-  _findInterval(zoneId) {
+  _findInterval(zoneId, zoneName = null, scheduleEntity = null) {
     if (!this._hass) return null;
     const states = this._hass.states;
-    let found = null;
+    const candidates = [];
+
     for (const eid of Object.keys(states)) {
-      if (!eid.startsWith("number.") || !eid.includes("mow_interval")) continue;
+      if (!eid.startsWith("number.")) continue;
       const st = states[eid];
-      const zid = st.attributes && st.attributes.zone_id;
-      if (zid !== undefined && Number(zid) === Number(zoneId)) {
-        found = st;
-        break;
+      const attrs = st.attributes || {};
+      const hasIntervalName = eid.includes("mow_interval") ||
+        String(st.name || attrs.friendly_name || "").toLowerCase().includes("mow interval");
+      if (!hasIntervalName) continue;
+      if (["unknown", "unavailable", ""].includes(st.state)) continue;
+
+      const attrZoneName = attrs.zone_name != null ? String(attrs.zone_name) : "";
+      const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
+      const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
+
+      // Prefer the strongest association: this scheduler config + zone name.
+      if (scheduleEntity && attrSource === scheduleEntity &&
+          zoneName != null && attrZoneName === String(zoneName)) {
+        return st;
       }
+      candidates.push({ st, attrZoneName, attrZoneId, attrSource });
     }
-    if (!found) return null;
-    const overrides = this._localOverrides;
-    const key = String(zoneId);
-    if (overrides && key in overrides) {
-      if (Number(found.state) === Number(overrides[key])) {
-        delete overrides[key]; // real state caught up -- drop the shim
-      } else {
-        return { ...found, state: String(overrides[key]) };
-      }
+
+    // Zone name is the stable semantic association used by the completion
+    // sensors; use it before falling back to numeric zone_id.
+    if (zoneName != null) {
+      const wanted = String(zoneName);
+      const byName = candidates.find(c => c.attrZoneName === wanted);
+      if (byName) return byName.st;
     }
-    return found;
+
+    const wantedId = Number(zoneId);
+    const byId = candidates.find(c => c.attrZoneId !== null && c.attrZoneId === wantedId);
+    return byId ? byId.st : null;
   }
 
   /** Age in *calendar* days, not rolling 24h windows. A completion at
@@ -518,7 +531,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
   _rowHtml(z) {
     const lm = this._findLastCompleted(z.id, z.name);
     const age = this._fmtAge(lm);
-    const intervalState = this._findInterval(z.id);
+    const intervalState = this._findInterval(z.id, z.name, this._scheduleEntity);
     const intervalDays = intervalState ? Number(intervalState.state) : 0;
     // Interval 0 = "not considered" -- never flagged overdue, matching how
     // the schedule preview/save/mow-now also skip these zones entirely.
@@ -571,7 +584,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
     const lastCompletedDate = {};
 
     zones.forEach((z) => {
-      const intervalState = this._findInterval(z.id);
+      const intervalState = this._findInterval(z.id, z.name, this._scheduleEntity);
       const intervalDays = intervalState ? Number(intervalState.state) : 0;
       if (!(intervalDays > 0)) return; // interval 0 (or missing) -> not considered
       const lm = this._findLastCompleted(z.id, z.name);

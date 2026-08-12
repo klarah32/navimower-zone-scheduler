@@ -149,38 +149,46 @@ def _zone_id(row: Any) -> int | None:
     return value if value > 0 else None
 
 
-def _interval_entity(hass: HomeAssistant, zone_id: int) -> str | None:
-    """Find a "<zone> mow interval" number entity for a zone.
+def _interval_entity(
+    hass: HomeAssistant,
+    schedule_entity: str,
+    zone_id: int,
+    zone_name: str | None,
+) -> str | None:
+    """Find the mow-interval entity for a schedule zone.
 
-    REVIEWED against the dashboard card's _findInterval(): the card matches
-    purely on domain (number.*) + "mow_interval" substring + zone_id
-    attribute -- nothing else. This used to also require
-    attrs.get("source_entity") == schedule_entity, which only ever exists
-    on entities created by this add-on's own number.py. Any zone whose
-    interval entity instead came from a directly-patched navimower
-    number.py (no "source_entity" attribute at all) matched in the card but
-    never matched here -- silently zero due zones, every time. Matching the
-    card's exact strategy fixes that and keeps the two permanently in sync
-    regardless of which integration created the entity.
-
-    Trade-off worth knowing: like the card, this has no per-mower scoping,
-    so if two different mowers ever reuse the same numeric zone_id, either
-    could return the wrong mower's entity. Not observed as an issue in
-    practice, but if it ever is, scoping both the card and this function by
-    schedule_entity/mower would need to happen together, not just here.
+    Prefer the scheduler's own entity (source_entity + zone_name), then
+    match by zone_name, and finally fall back to zone_id for older entities.
+    This avoids depending on Home Assistant's entity-id slug/collision suffix.
     """
+    candidates: list[tuple[str, Any]] = []
     for state in hass.states.async_all("number"):
-        if "mow_interval" not in state.entity_id:
-            continue
+        eid = state.entity_id
         attrs = state.attributes
-        try:
-            if int(attrs.get("zone_id")) != zone_id:
-                continue
-        except (TypeError, ValueError):
+        if "mow_interval" not in eid and "mow interval" not in str(
+            attrs.get("friendly_name", "")
+        ).lower():
             continue
         if state.state in ("unknown", "unavailable", ""):
             continue
-        return state.entity_id
+        if attrs.get("source_entity") == schedule_entity and (
+            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
+        ):
+            return eid
+        candidates.append((eid, state))
+
+    if zone_name is not None:
+        wanted = str(zone_name)
+        for eid, state in candidates:
+            if str(state.attributes.get("zone_name", "")) == wanted:
+                return eid
+
+    for eid, state in candidates:
+        try:
+            if int(state.attributes.get("zone_id")) == zone_id:
+                return eid
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -359,7 +367,7 @@ async def _eligible_zones(
         if zone_id is None:
             continue
 
-        interval_entity = _interval_entity(hass, zone_id)
+        interval_entity = _interval_entity(hass, schedule_entity, zone_id, row.get("name"))
         if interval_entity is None:
             continue
 
