@@ -202,6 +202,17 @@ def _norm_name(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+def _slugify_zone_name(value: Any) -> str:
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.casefold()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text
+
+
 def _last_completed_state(
     hass: HomeAssistant, zone_id: int, zone_name: str | None = None
 ) -> Any | None:
@@ -237,30 +248,41 @@ def _last_completed_state(
     return None
 
 
-def _registry_completion_entity(
+def _registry_completion_entities(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
-) -> str | None:
-    """Find a Navimow completion entity in the registry, even if not in states."""
+) -> list[str]:
+    """Return registry completion entities, including stale/disabled entries."""
     registry = er.async_get(hass)
     schedule_entry = registry.async_get(schedule_entity)
     device_id = schedule_entry.device_id if schedule_entry else None
     wanted_name = _norm_name(zone_name)
     unique_suffix = f"_zone_{zone_id}_last_completed"
+    result: list[str] = []
 
     for entry in registry.entities.values():
         if entry.domain != "sensor":
             continue
-        # Keep disabled registry entries: their Recorder history can still
-        # contain the last completion even though they are absent from states.
         if device_id and entry.device_id and entry.device_id != device_id:
             continue
         unique_id = str(entry.unique_id or "")
         original_name = _norm_name(entry.original_name or entry.name)
-        if unique_id.endswith(unique_suffix):
-            return entry.entity_id
-        if wanted_name and original_name == f"{wanted_name} last completed":
-            return entry.entity_id
-    return None
+        if unique_id.endswith(unique_suffix) or (
+            wanted_name and original_name == f"{wanted_name} last completed"
+        ):
+            result.append(entry.entity_id)
+
+    # The entity may have been removed from the registry but its Recorder
+    # history can still exist. Navimow normally derives the entity ID from
+    # the mower/schedule prefix and the zone name, so include those candidates.
+    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
+    slug = _slugify_zone_name(zone_name)
+    if slug:
+        result.extend((
+            f"sensor.{schedule_prefix}_{slug}_last_completed",
+            f"sensor.{slug}_last_completed",
+        ))
+
+    return list(dict.fromkeys(result))
 
 
 def _history_last_state(hass: HomeAssistant, entity_id: str) -> Any | None:
@@ -290,16 +312,20 @@ async def _latest_completion(
 ) -> date | None:
     """Return the latest completion date, including Recorder-only history."""
     state = _last_completed_state(hass, zone_id, zone_name)
-    if state is None:
-        entity_id = _registry_completion_entity(hass, schedule_entity, zone_id, zone_name)
-        if entity_id:
-            state = await hass.async_add_executor_job(_history_last_state, hass, entity_id)
-    if state is None or state.state in ("unknown", "unavailable", ""):
-        return None
-    parsed = dt_util.parse_datetime(state.state)
-    if parsed is None:
-        return None
-    return dt_util.as_local(parsed).date()
+    if state is not None and state.state not in ("unknown", "unavailable", ""):
+        parsed = dt_util.parse_datetime(state.state)
+        if parsed is not None:
+            return dt_util.as_local(parsed).date()
+
+    for entity_id in _registry_completion_entities(hass, schedule_entity, zone_id, zone_name):
+        historical = await hass.async_add_executor_job(_history_last_state, hass, entity_id)
+        if historical is None:
+            continue
+        parsed = dt_util.parse_datetime(getattr(historical, "state", ""))
+        if parsed is not None:
+            return dt_util.as_local(parsed).date()
+
+    return None
 
 
 async def _eligible_zones(

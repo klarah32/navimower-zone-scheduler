@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "1.3.5";
+const CARD_VERSION = "1.3.6";
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -365,6 +365,15 @@ class NavimowZoneIntervalCard extends HTMLElement {
     return null;
   }
 
+  _slugifyZoneName(value) {
+    return String(value == null ? "" : value)
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLocaleLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
   async _loadCompletionHistory(zones) {
     if (!this._hass || !this._config || !this._hass.callWS || !Array.isArray(zones)) return;
     const signature = zones.map((z) => `${z.id}:${z.name || ""}`).join("|");
@@ -379,6 +388,9 @@ class NavimowZoneIntervalCard extends HTMLElement {
 
       const candidates = new Map();
       const norm = (value) => String(value == null ? "" : value).trim().toLocaleLowerCase();
+      const schedulePrefix = String(this._config.entity || "")
+        .replace(/^sensor\./, "")
+        .replace(/_schedule$/, "");
 
       for (const zone of zones) {
         const zid = Number(zone.id);
@@ -389,17 +401,29 @@ class NavimowZoneIntervalCard extends HTMLElement {
         const wantedUniqueSuffix = `_zone_${zid}_last_completed`;
         const matches = entries.filter((e) => {
           if (!e || !e.entity_id || !e.entity_id.startsWith("sensor.")) return false;
-          // Keep disabled registry entries: Recorder can still contain the
-          // completion history even when the live entity is not in hass.states.
           if (deviceId && e.device_id && e.device_id !== deviceId) return false;
           const unique = String(e.unique_id || "");
           const original = norm(e.original_name || e.name);
           const byId = unique.endsWith(wantedUniqueSuffix);
           const byName = wantedName && original === `${wantedName} last completed`;
           return byId || byName;
-        });
+        }).map((e) => e.entity_id);
 
-        if (matches.length) candidates.set(String(zid), matches.map((e) => e.entity_id));
+        // Recorder history survives removal from the entity registry. In that
+        // case there is no registry entry left to discover. Add the entity IDs
+        // that the Navimow integration normally derives from the current mower
+        // name + zone name, plus the generic zone-name form. This is especially
+        // important after a zone/map recreation: the old completion entity can
+        // disappear from hass.states and the registry while its Recorder row
+        // remains available (e.g. sensor.eltern_mulltonnen_last_completed).
+        const slug = this._slugifyZoneName(zone.name);
+        if (slug) {
+          matches.push(`sensor.${schedulePrefix}_${slug}_last_completed`);
+          matches.push(`sensor.${slug}_last_completed`);
+        }
+
+        const uniqueMatches = [...new Set(matches)];
+        if (uniqueMatches.length) candidates.set(String(zid), uniqueMatches);
       }
 
       const entityIds = [...new Set([...candidates.values()].flat())];
