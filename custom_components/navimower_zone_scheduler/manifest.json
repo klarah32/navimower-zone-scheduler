@@ -1,13 +1,18 @@
 {
   "domain": "navimower_zone_scheduler",
-  "name": "NaviMower Zone Scheduler (add-on)",
-  "codeowners": [],
+  "name": "NaviMower Zone Scheduler",
+  "codeowners": [
+    "@klarah32"
+  ],
   "config_flow": true,
-  "dependencies": ["http", "frontend"],
-  "documentation": "https://github.com/yourname/navimower-zone-scheduler",
+  "dependencies": [
+    "http",
+    "frontend"
+  ],
+  "documentation": "https://github.com/klarah32/navimower-zone-scheduler",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/yourname/navimower-zone-scheduler/issues",
+  "issue_tracker": "https://github.com/klarah32/navimower-zone-scheduler/issues",
   "requirements": [],
-  "version": "1.3.4"
+  "version": "1.3.5"
 }
