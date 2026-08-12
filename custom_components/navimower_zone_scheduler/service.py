@@ -9,7 +9,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import sun as sun_helper
@@ -56,6 +56,12 @@ def _validate_time_spec(value: str) -> str:
         "'sunrise'/'sunset', or an offset in minutes like 'sunset-30'"
     )
 
+
+GET_DUE_SCHEMA = vol.Schema(
+    {
+        vol.Required("schedule_entity"): cv.entity_id,
+    }
+)
 
 MOW_DUE_SCHEMA = vol.Schema(
     {
@@ -372,13 +378,41 @@ async def _eligible_zones(
     return intervals, next_due, last_completed_by_zone
 
 
-async def _due_zone_ids(hass: HomeAssistant, schedule_entity: str) -> list[int]:
-    """Calculate today's due zones for one schedule sensor."""
+async def _due_zone_details(hass: HomeAssistant, schedule_entity: str) -> dict[str, Any]:
+    """Return today's due zones with names, IDs, intervals and completion dates."""
     today = dt_util.now().date()
-    _intervals, next_due, _last_completed = await _eligible_zones(hass, schedule_entity)
-    due = [zone_id for zone_id, due_date in next_due.items() if due_date <= today]
-    # Defensive guarantee for navimower.mow: only positive integers leave here.
-    return [zone_id for zone_id in due if isinstance(zone_id, int) and zone_id > 0]
+    intervals, next_due, last_completed = await _eligible_zones(hass, schedule_entity)
+    schedule = hass.states.get(schedule_entity)
+    zones = schedule.attributes.get("zones", []) if schedule else []
+    names_by_id = {
+        zid: str(row.get("name") or f"Zone {zid}")
+        for row in zones
+        if (zid := _zone_id(row)) is not None
+    }
+    due_ids = [zid for zid, due_date in next_due.items() if due_date <= today]
+    due_ids = [zid for zid in due_ids if isinstance(zid, int) and zid > 0]
+    due_zones = []
+    for zid in due_ids:
+        due_zones.append({
+            "id": zid,
+            "name": names_by_id.get(zid, f"Zone {zid}"),
+            "interval_days": intervals[zid],
+            "last_completed": last_completed[zid].isoformat() if last_completed[zid] else None,
+            "due_date": next_due[zid].isoformat(),
+        })
+    return {
+        "schedule_entity": schedule_entity,
+        "count": len(due_zones),
+        "zone_ids": due_ids,
+        "zone_names": [z["name"] for z in due_zones],
+        "due_zones": due_zones,
+    }
+
+
+async def _due_zone_ids(hass: HomeAssistant, schedule_entity: str) -> list[int]:
+    """Calculate today's due zone IDs for one schedule sensor."""
+    details = await _due_zone_details(hass, schedule_entity)
+    return details["zone_ids"]
 
 
 async def _simulate_due_schedule(
@@ -422,6 +456,11 @@ async def _simulate_due_schedule(
             next_due[zid] = day + timedelta(days=intervals[zid])
 
     return schedule_by_day
+
+
+async def async_handle_get_due_zones(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
+    """Return today's due zones without starting the mower."""
+    return await _due_zone_details(hass, call.data["schedule_entity"])
 
 
 async def async_handle_mow_due_zones(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -508,6 +547,19 @@ async def async_handle_save_due_schedule(hass: HomeAssistant, call: ServiceCall)
 
 def async_register_services(hass: HomeAssistant) -> None:
     """Register integration services."""
+    if not hass.services.has_service("navimower_zone_scheduler", "get_due_zones"):
+
+        async def _handle_get(call: ServiceCall) -> dict[str, Any]:
+            return await async_handle_get_due_zones(hass, call)
+
+        hass.services.async_register(
+            "navimower_zone_scheduler",
+            "get_due_zones",
+            _handle_get,
+            schema=GET_DUE_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
+
     if not hass.services.has_service("navimower_zone_scheduler", SERVICE_MOW_DUE_ZONES):
 
         async def _handle_mow(call: ServiceCall) -> None:

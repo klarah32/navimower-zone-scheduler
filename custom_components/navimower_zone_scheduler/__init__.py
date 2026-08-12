@@ -25,7 +25,7 @@ from .service import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["number"]
+PLATFORMS = ["number", "sensor"]
 
 _CARD_FILENAME = "navimow-zone-interval-card.js"
 _CARD_URL_BASE = "/navimower_zone_scheduler_static"

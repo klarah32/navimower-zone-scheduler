@@ -1,3 +1,17 @@
+get_due_zones:
+  name: Get due zones
+  description: >-
+    Calculate today's due zones for a schedule without starting the mower.
+    The service returns zone IDs, names, intervals, due dates and last-completed dates.
+  fields:
+    schedule_entity:
+      name: Schedule entity
+      description: The mower's Schedule sensor, for example sensor.eltern_schedule.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+
 mow_due_zones:
   name: Mow due zones now
   description: >-

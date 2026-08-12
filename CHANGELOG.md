@@ -1,3 +1,10 @@
+## 1.3.9
+- Add a per-mower `Mow due zones` sensor exposing the canonical due-zone list and metadata.
+- Add `navimower_zone_scheduler.get_due_zones`, a response-only service using the same calculation without mowing.
+- Keep `mow_due_zones` and `save_due_schedule` on the same shared calculation path.
+- The due-zone sensor refreshes on schedule changes and every minute.
+- Bump the bundled card version to v1.3.9.
+
 ## 1.3.8
 - Find all `*_last_completed*` sensors belonging to the configured mower first.
 - Link completion sensors to schedule zones by the sensor `zone_name`, not by numeric zone ID.

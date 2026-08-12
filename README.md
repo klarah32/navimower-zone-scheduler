@@ -85,11 +85,13 @@ Add one card per mower, pointing each at that mower's own Schedule sensor.
 
 ## Services (Actions)
 
-Two domain-level actions, available as soon as the integration is
-installed (no config entry needed to call them, though you'll obviously
-want the `number` entities from at least one entry to have anything to
-act on):
+Three domain-level actions, available as soon as the integration is
+installed. The config entry also creates a per-mower due-zone sensor, so
+automations do not need to duplicate the due-zone calculation:
 
+- **`navimower_zone_scheduler.get_due_zones`** -- response-only action that
+  calculates today's due zones without starting the mower. The response
+  contains `zone_ids`, `zone_names`, `count`, and detailed `due_zones` data.
 - **`navimower_zone_scheduler.mow_due_zones`** -- calculates which zones
   are due *today* (own interval elapsed since last full completion) and
   calls `navimower.mow` with just those zones, immediately. Zones with
@@ -149,6 +151,50 @@ action:
       end: "sunset+30"
       days: 7
 ```
+
+
+### Due-zone sensor
+
+Each configured mower exposes a sensor named `<mower> Mow Due Zones`, for
+example `sensor.eltern_mow_due_zones`. Its numeric state is the number of
+zones due today. The `zone_names`, `zone_ids`, and `due_zones` attributes are
+the canonical result of the same calculation used by `mow_due_zones` and
+`get_due_zones`. This is the recommended source for notification
+automations.
+
+Example notification automation:
+
+```yaml
+alias: "Eltern: mow due zones now (redmi_note_4)"
+sequence:
+  - variables:
+      due_zone_names: "{{ state_attr('sensor.eltern_mow_due_zones', 'zone_names') or [] }}"
+  - if:
+      - condition: template
+        value_template: "{{ due_zone_names | length == 0 }}"
+    then:
+      - action: notify.mobile_app_redmi_note_4
+        data:
+          title: Eltern
+          message: No zones are due to mow right now.
+    else:
+      - action: notify.mobile_app_redmi_note_4
+        data:
+          title: Eltern - mow due zones?
+          message: "{{ due_zone_names | join(', ') }}"
+          data:
+            tag: eltern_mow_confirm
+            actions:
+              - action: ELTERN_MOW_CONFIRM
+                title: Mow
+              - action: ELTERN_MOW_DENY
+                title: Cancel
+      # wait_for_trigger / confirmation follows here; on confirmation call
+      # navimower_zone_scheduler.mow_due_zones with the same schedule_entity.
+```
+
+The automation deliberately does not calculate intervals or completion
+entities itself. The integration owns that logic in one place.
 
 ## After installing
 
