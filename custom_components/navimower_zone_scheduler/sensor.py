@@ -9,9 +9,12 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import EVENT_STATE_CHANGED, HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_event, async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_SCHEDULE_ENTITY
@@ -63,10 +66,26 @@ class DueZonesSensor(SensorEntity):
         # sensors. Listen to state changes for all of those rather than only
         # the schedule, so the published attribute is immediately current
         # when an interval is changed.
+        # Track the entities that can change the due-zone result.
+        # Use Home Assistant's supported entity-state helper.
+        entity_ids = [self._schedule_entity]
+        entity_ids.extend(
+            state.entity_id
+            for state in self.hass.states.async_all("number")
+            if "mow_interval" in state.entity_id
+        )
+        entity_ids.extend(
+            state.entity_id
+            for state in self.hass.states.async_all("sensor")
+            if (
+                state.entity_id.startswith(f"sensor.{self._prefix}_")
+                and "last_completed" in state.entity_id
+            )
+        )
         self.async_on_remove(
-            async_track_event(
+            async_track_state_change_event(
                 self.hass,
-                EVENT_STATE_CHANGED,
+                entity_ids,
                 self._state_changed,
             )
         )

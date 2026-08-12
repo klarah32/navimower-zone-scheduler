@@ -1,3 +1,8 @@
+## 1.3.12
+- Fix due-zone sensor setup by using `async_track_state_change_event`, the supported Home Assistant entity-state listener.
+- Restores setup of the independent per-zone mow-interval number entities alongside the due-zone sensor.
+- Bundled card version is now v1.3.12.
+
 ## 1.3.11
 - Fix due-zone sensor publishing: explicitly writes updated state/attributes.
 - Refresh due-zone sensor immediately when schedule, interval, or last-completed entities change.
