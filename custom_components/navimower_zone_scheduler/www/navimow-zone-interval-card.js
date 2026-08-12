@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "12";
+const CARD_VERSION = "1.3.4";
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -132,7 +132,10 @@ class NavimowZoneIntervalCard extends HTMLElement {
     this._built = true;
     this.innerHTML = `
       <ha-card>
-        <div class="nmz-title"></div>
+        <div class="nmz-title-row">
+          <div class="nmz-title"></div>
+          <div class="nmz-version">v${CARD_VERSION}</div>
+        </div>
         <div class="nmz-rows"></div>
         <div class="nmz-actions">
           <button class="nmz-btn nmz-btn-mownow">Mow due zones now</button>
@@ -153,10 +156,22 @@ class NavimowZoneIntervalCard extends HTMLElement {
       </ha-card>
       <style>
         ha-card { padding: 8px 12px 10px; }
+        .nmz-title-row {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 2px;
+        }
         .nmz-title {
           font-size: 13px; font-weight: 600;
           color: var(--primary-text-color, #212121);
-          margin-bottom: 2px;
+        }
+        .nmz-version {
+          font-size: 10px;
+          font-weight: 500;
+          color: var(--secondary-text-color, #727272);
+          white-space: nowrap;
         }
         .nmz-empty {
           font-size: 13px; opacity: 0.7;
