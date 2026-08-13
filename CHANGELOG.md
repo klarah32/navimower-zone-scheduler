@@ -1,3 +1,7 @@
+## 1.3.14
+- Prefix each `number.*_mow_interval` entity's name with its mower (derived from the config entry's schedule sensor, e.g. `sensor.eltern_schedule` -> "Eltern"), so two mowers sharing a zone name (e.g. both have "Birnbaum") get distinct entity IDs like `number.eltern_birnbaum_mow_interval` / `number.gerd_birnbaum_mow_interval` instead of colliding on `number.birnbaum_mow_interval` (+ `_2` suffix).
+- No change to `unique_id`, storage keys, or the `source_entity`/`zone_name`/`zone_id` attributes the backend service and card already match on -- only the displayed/auto-generated name changes.
+
 ## 1.3.13
 - Make `get_due_zones` the canonical live calculation for automation responses.
 - Keep `sensor.*_mow_due_zones` as a presentation/cache of that same calculation.

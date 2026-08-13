@@ -35,6 +35,20 @@ async def async_setup_entry(
     schedule_entity_id: str = entry.data[CONF_SCHEDULE_ENTITY]
     store = _zone_store(hass, entry.entry_id)
 
+    # Same derivation DueZonesSensor uses for its own name/prefix, so the
+    # mower label shown here matches the one already visible elsewhere
+    # (e.g. "Eltern mow due zones"). Prepending it to each interval
+    # entity's name keeps two mowers that happen to share a zone name
+    # (e.g. both have a "Birnbaum" zone) from colliding on entity_id --
+    # without it, HA would silently suffix the second one with "_2",
+    # which is exactly the kind of mix-up this is meant to avoid.
+    mower_label = (
+        schedule_entity_id.removeprefix("sensor.")
+        .removesuffix("_schedule")
+        .replace("_", " ")
+        .title()
+    )
+
     intervals: dict[int, int] = {}
     try:
         cached = await store.async_load()
@@ -66,7 +80,9 @@ async def async_setup_entry(
                 continue
             known_zone_ids.add(zone_id)
             new_entities.append(
-                ZoneMowIntervalNumber(entry, schedule_entity_id, zone_id, intervals, store)
+                ZoneMowIntervalNumber(
+                    entry, schedule_entity_id, zone_id, intervals, store, mower_label
+                )
             )
         if new_entities:
             async_add_entities(new_entities)
@@ -111,12 +127,14 @@ class ZoneMowIntervalNumber(NumberEntity):
         zone_id: int,
         intervals: dict[int, int],
         store: Store,
+        mower_label: str,
     ) -> None:
         self._entry = entry
         self._schedule_entity_id = schedule_entity_id
         self._zone_id = zone_id
         self._intervals = intervals
         self._store = store
+        self._mower_label = mower_label
         # Stable across zone renames -- only the *name* is re-derived live.
         self._attr_unique_id = f"{entry.entry_id}_zone_{zone_id}_mow_interval"
 
@@ -130,7 +148,11 @@ class ZoneMowIntervalNumber(NumberEntity):
     @property
     def name(self) -> str:
         zone_name = str(self._zone_row().get("name") or f"Zone {self._zone_id}")
-        return f"{zone_name} mow interval"
+        # Mower label first so the entity_id (and thus the auto-generated
+        # entity_id slug) is unique across mowers that share a zone name --
+        # e.g. "Eltern Birnbaum mow interval" / "Gerd Birnbaum mow interval"
+        # instead of both wanting "birnbaum_mow_interval".
+        return f"{self._mower_label} {zone_name} mow interval"
 
     @property
     def native_value(self) -> float:
