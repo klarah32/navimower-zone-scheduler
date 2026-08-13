@@ -1,3 +1,8 @@
+## 1.3.15
+- Fix card bug: `navimow-zone-interval-card` referenced `this._scheduleEntity`, which was never assigned anywhere -- always `undefined`. This silently disabled the strong `source_entity` + `zone_name` match in `_findInterval`, so the card fell back to matching by zone name alone across *all* mowers' interval entities. Two mowers sharing a zone name (e.g. both have "Birnbaum") could end up sharing the same underlying `number.*_mow_interval` entity: dragging the slider on one card's zone also changed the other mower's same-named zone.
+- Now correctly scopes the match to `this._config.entity` (the schedule sensor this specific card is configured against), same as `_findLastCompleted` already did.
+- Bundled card version bumped to v1.3.15.
+
 ## 1.3.14
 - Prefix each `number.*_mow_interval` entity's name with its mower (derived from the config entry's schedule sensor, e.g. `sensor.eltern_schedule` -> "Eltern"), so two mowers sharing a zone name (e.g. both have "Birnbaum") get distinct entity IDs like `number.eltern_birnbaum_mow_interval` / `number.gerd_birnbaum_mow_interval` instead of colliding on `number.birnbaum_mow_interval` (+ `_2` suffix).
 - No change to `unique_id`, storage keys, or the `source_entity`/`zone_name`/`zone_id` attributes the backend service and card already match on -- only the displayed/auto-generated name changes.

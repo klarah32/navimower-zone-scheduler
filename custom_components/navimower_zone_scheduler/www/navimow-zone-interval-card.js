@@ -74,7 +74,7 @@
  *   end: "20:00"                      # optional, preview/save window end
  */
 
-const CARD_VERSION = "1.3.13"
+const CARD_VERSION = "1.3.15"
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -531,7 +531,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
   _rowHtml(z) {
     const lm = this._findLastCompleted(z.id, z.name);
     const age = this._fmtAge(lm);
-    const intervalState = this._findInterval(z.id, z.name, this._scheduleEntity);
+    const intervalState = this._findInterval(z.id, z.name, this._config.entity);
     const intervalDays = intervalState ? Number(intervalState.state) : 0;
     // Interval 0 = "not considered" -- never flagged overdue, matching how
     // the schedule preview/save/mow-now also skip these zones entirely.
@@ -584,7 +584,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
     const lastCompletedDate = {};
 
     zones.forEach((z) => {
-      const intervalState = this._findInterval(z.id, z.name, this._scheduleEntity);
+      const intervalState = this._findInterval(z.id, z.name, this._config.entity);
       const intervalDays = intervalState ? Number(intervalState.state) : 0;
       if (!(intervalDays > 0)) return; // interval 0 (or missing) -> not considered
       const lm = this._findLastCompleted(z.id, z.name);
