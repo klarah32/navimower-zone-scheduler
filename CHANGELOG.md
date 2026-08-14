@@ -1,3 +1,23 @@
+## 1.3.17
+- Fixed the actual root cause of unreliable "last completed" discovery:
+  both the backend (`service.py`) and the card were deriving a mower
+  "prefix" by string-slicing the *schedule* entity's own entity ID
+  (`sensor.garten_eltern_schedule` -> `garten_eltern_`). When that slug
+  picks up an unrelated word -- like "garten" from an area/category --
+  the completion sensors' own entity IDs never had that word
+  (`sensor.eltern_birnbaum_last_completed`, no "garten"), so the prefix
+  never matched anything and discovery silently found nothing.
+- Discovery is now scoped by the schedule sensor's *device* (via the
+  entity registry) instead of any derived prefix, and matches only on the
+  zone-name slug immediately preceding `_last_completed` in the entity
+  ID (plus an optional `_2`/`_3` collision suffix) -- nothing else. No
+  `zone_name` attribute check, no `original_name` comparison. The first
+  matching entity (sorted alphabetically) is used, full stop -- no
+  timestamp-based "best match" ranking.
+- This intentionally drops the `zone_name`-attribute matching added in
+  1.3.16 in favor of this simpler, device-scoped, first-found approach.
+- Bundled card version bumped to v1.3.17.
+
 ## 1.3.16
 - More stable "last completed" sensor discovery: entity IDs such as
   `sensor.garten_eltern_birnbaum_last_completed` now also match by the

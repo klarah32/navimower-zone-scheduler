@@ -213,15 +213,7 @@ def _interval_days(hass: HomeAssistant, interval_entity: str) -> float | None:
 
 
 def _norm_name(value: Any) -> str:
-    """Casefold + strip diacritics so e.g. "Birnbaum" / "birnbäum" line up.
-
-    Previously this only trimmed/casefolded, while `_slugify_zone_name`
-    (used for entity-ID matching) also stripped diacritics. That mismatch
-    meant an umlaut/accent in a zone name could make the attribute-based
-    match fail while the slug-based match succeeded, or vice versa --
-    exactly the kind of "sometimes it finds it, sometimes it doesn't"
-    instability this normalizes away.
-    """
+    """Casefold + strip diacritics so e.g. "Birnbaum" / "birnbäum" line up."""
     import unicodedata
 
     text = unicodedata.normalize("NFKD", str(value or ""))
@@ -240,108 +232,77 @@ def _slugify_zone_name(value: Any) -> str:
     return text
 
 
-def _entity_id_zone_slug(entity_id: str, prefix: str) -> str | None:
-    """Extract the zone-name slug embedded in a completion entity ID.
+def _completion_entity_ids_for_zone(
+    hass: HomeAssistant, schedule_entity: str, zone_name: str | None
+) -> list[str]:
+    """Every "<zone> last completed" sensor for one zone, cheaply matched.
 
-    E.g. given ``sensor.garten_eltern_birnbaum_last_completed`` (or an
-    ``_last_completed_2``-style collision-suffixed variant) and the
-    mower's ``sensor.garten_eltern_`` prefix, returns ``"birnbaum"``.
+    On purpose this takes only three things for granted: the mower
+    (identified by its *device*, not by string-slicing a prefix off any
+    entity's own name), the zone name, and the literal "last_completed"
+    suffix Navimower always bakes into these entity IDs (plus an optional
+    ``_2``/``_3`` collision suffix). Nothing else -- no ``zone_name``
+    attribute lookup, no entity-registry ``original_name`` comparison.
 
-    Navimower bakes the zone name into the entity ID at creation time, so
-    this is a match that doesn't depend on the ``zone_name`` attribute or
-    the registry's ``original_name`` being present/current at all -- both
-    of which can go stale (attribute missing on some integration
-    versions, original_name frozen from before a zone rename) and are
-    exactly what made discovery "sometimes" find the right sensor.
+    The previous version derived a mower "prefix" by slicing
+    ``schedule_entity``'s own entity ID (``sensor.garten_eltern_schedule``
+    -> ``garten_eltern_``). That silently broke whenever the schedule
+    sensor's slug picked up an unrelated word -- e.g. "garten" from an
+    area/category -- that the completion sensors' own IDs never had
+    (``sensor.eltern_birnbaum_last_completed``, no "garten" at all), so
+    the prefix never matched and nothing was found. Scoping by the
+    schedule entity's *device* instead sidesteps prefix-guessing
+    entirely: it's the same physical mower regardless of what either
+    entity happens to be named.
+
+    Returns entity IDs sorted alphabetically -- the first one is treated
+    as "the" completion sensor for this zone by the callers below.
     """
-    if not entity_id.startswith(prefix):
-        return None
-    remainder = entity_id[len(prefix):]
-    remainder = re.sub(r"_last_completed(?:_\d+)?$", "", remainder)
-    return remainder or None
+    zone_slug = _slugify_zone_name(zone_name)
+    if not zone_slug:
+        return []
+    pattern = re.compile(rf"_{re.escape(zone_slug)}_last_completed(?:_\d+)?$")
+
+    registry = er.async_get(hass)
+    schedule_entry = registry.async_get(schedule_entity)
+    device_id = schedule_entry.device_id if schedule_entry else None
+
+    matches = [
+        entry.entity_id
+        for entry in registry.entities.values()
+        if entry.domain == "sensor"
+        and pattern.search(entry.entity_id)
+        # If the schedule sensor has no device link for some reason, fall
+        # back to an unscoped (still slug-matched) search rather than
+        # finding nothing at all.
+        and (device_id is None or entry.device_id == device_id)
+    ]
+    return sorted(matches)
 
 
 def _last_completed_state(
     hass: HomeAssistant, schedule_entity: str, zone_name: str | None = None
 ) -> Any | None:
-    """Find the mower's completion sensor by mower prefix + zone name.
-
-    Navimower can create entity IDs such as
-    ``sensor.eltern_zone_1_last_completed_3``. The numeric zone ID in that
-    entity ID is not a reliable link to the current schedule zone. The
-    primary relationship is the mower prefix plus the sensor's
-    ``zone_name`` attribute; as a fallback (attribute missing/stale) the
-    zone name slug embedded in the entity ID itself is also accepted --
-    see `_entity_id_zone_slug`.
-    """
-    wanted_name = _norm_name(zone_name)
-    if not wanted_name:
-        return None
-    wanted_slug = _slugify_zone_name(zone_name)
-
-    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
-    prefix = f"sensor.{schedule_prefix}_"
-    pattern = re.compile(r"_last_completed(?:_\d+)?$")
-
-    best = None
-    best_ts = float("-inf")
-    for state in hass.states.async_all("sensor"):
-        eid = state.entity_id
-        if not eid.startswith(prefix) or not pattern.search(eid):
-            continue
-        matches_attr = _norm_name(state.attributes.get("zone_name")) == wanted_name
-        matches_id = bool(wanted_slug) and _entity_id_zone_slug(eid, prefix) == wanted_slug
-        if not (matches_attr or matches_id):
-            continue
-        value = str(state.state or "")
-        if value in ("unknown", "unavailable", ""):
-            continue
-        parsed = dt_util.parse_datetime(value)
-        ts = parsed.timestamp() if parsed is not None else float("-inf")
-        if best is None or ts > best_ts:
-            best = state
-            best_ts = ts
-
-    return best
+    """Return the first matching completion sensor's current live state."""
+    for entity_id in _completion_entity_ids_for_zone(hass, schedule_entity, zone_name):
+        state = hass.states.get(entity_id)
+        if state is not None and state.state not in ("unknown", "unavailable", ""):
+            return state
+    return None
 
 
 def _registry_completion_entities(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
 ) -> list[str]:
-    """Find all registered completion sensors for this mower + zone name.
+    """All registered completion sensors for this zone (live or disabled).
 
-    This is the path used for disabled-by-default entities (no live
-    state, so `_last_completed_state` above can't see them) and for
-    Recorder-only history. `original_name` is frozen at entity-creation
-    time, so a zone renamed afterwards silently breaks the name-based
-    match here; the entity-ID zone slug doesn't have that problem since
-    it's checked against the *current* zone name, so it's included as an
-    equally-valid match rather than a last-resort.
+    ``zone_id`` is unused -- kept only so the call site in
+    `_latest_completion` doesn't need to change -- since matching is
+    purely by device + zone-name slug now (see
+    `_completion_entity_ids_for_zone`), which also covers disabled
+    entities since the registry lists those too.
     """
-    registry = er.async_get(hass)
-    schedule_entry = registry.async_get(schedule_entity)
-    device_id = schedule_entry.device_id if schedule_entry else None
-    wanted_name = _norm_name(zone_name)
-    wanted_slug = _slugify_zone_name(zone_name)
-    schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
-    prefix = f"sensor.{schedule_prefix}_"
-    pattern = re.compile(r"_last_completed(?:_\d+)?$")
-    result: list[str] = []
-
-    for entry in registry.entities.values():
-        if entry.domain != "sensor" or not entry.entity_id.startswith(prefix):
-            continue
-        if device_id and entry.device_id and entry.device_id != device_id:
-            continue
-        if not pattern.search(entry.entity_id):
-            continue
-        original = _norm_name(entry.original_name or entry.name)
-        matches_name = bool(wanted_name) and original == f"{wanted_name} last completed"
-        matches_id = bool(wanted_slug) and _entity_id_zone_slug(entry.entity_id, prefix) == wanted_slug
-        if matches_name or matches_id:
-            result.append(entry.entity_id)
-
-    return list(dict.fromkeys(result))
+    return _completion_entity_ids_for_zone(hass, schedule_entity, zone_name)
 
 
 def _history_last_state(hass: HomeAssistant, entity_id: str) -> Any | None:

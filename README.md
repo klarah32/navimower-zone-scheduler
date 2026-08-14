@@ -230,23 +230,28 @@ configured mower, it first reads the zones from the mower's Schedule sensor
 and the corresponding `number.*_mow_interval` entities.
 
 For completion history it finds the mower's `*_last_completed*` sensors and
-matches them to schedule zones by the sensor's `zone_name`, or, if that
-attribute is missing/stale, by the zone-name slug embedded in the entity ID
-itself (e.g. `sensor.garten_eltern_birnbaum_last_completed` matches zone
-"Birnbaum"). This is important because Home Assistant entity IDs can have
-collision suffixes such as `_2` or `_3`, and the numeric `zone_id` used by a
-current schedule can differ from a historical completion sensor's ID.
+matches them to schedule zones by scoping to the mower's *device* (via the
+entity registry, not by parsing any entity's name) and matching only the
+zone-name slug immediately preceding `_last_completed` in the entity ID --
+e.g. `sensor.eltern_birnbaum_last_completed` matches zone "Birnbaum". This is
+important because Home Assistant entity IDs can have collision suffixes such
+as `_2` or `_3`, and because a schedule sensor's own entity ID can pick up
+unrelated words (like an area name) that the completion sensors' IDs never
+have -- device-scoping avoids relying on that at all. The first matching
+sensor found is used.
 
 A missing or invalid completion timestamp makes that zone due. An interval
 of `0` means the zone is not considered for mowing.
 
 If automatic matching still picks the wrong sensor for a zone (or none at
-all), open the `navimow-zone-interval-card` in the dashboard editor and
-expand **Advanced entity overrides** -- pick the correct `*_last_completed*`
-sensor for that zone there. This only affects the card itself (its display,
-the Mow-now button, and the 7-day preview); it does not change what
-`mow_due_zones`, `save_due_schedule`, or the `Mow Due Zones` sensor use,
-since those still rely on the automatic matching described above.
+all -- for example if a mower has multiple completion sensors for the same
+zone name and the "first found" one isn't the right one), open the
+`navimow-zone-interval-card` in the dashboard editor and expand **Advanced
+entity overrides** -- pick the correct `*_last_completed*` sensor for that
+zone there. This only affects the card itself (its display, the Mow-now
+button, and the 7-day preview); it does not change what `mow_due_zones`,
+`save_due_schedule`, or the `Mow Due Zones` sensor use, since those still
+rely on the automatic matching described above.
 
 ## Automation recommendation
 

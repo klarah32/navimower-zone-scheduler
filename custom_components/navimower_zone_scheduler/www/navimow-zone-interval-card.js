@@ -87,7 +87,7 @@
  * own backend auto-discovery in service.py and don't see this override.
  */
 
-const CARD_VERSION = "1.3.16"
+const CARD_VERSION = "1.3.17"
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -334,11 +334,17 @@ class NavimowZoneIntervalCard extends HTMLElement {
   }
 
   // --------------------------------------------------------------- lookup
-  /** Find the "<zone> last completed" sensor by its zone_id attribute, not
-   *  by guessing the slug of the zone's (possibly renamed) friendly name.
-   *  Uses "completed" (full-coverage finish) rather than "mowed" (any
-   *  mowing activity, including a partial/interrupted pass) as the signal
-   *  for how overdue a zone is. */
+  /** Find the "<zone> last completed" sensor and take only three things
+   *  for granted: the mower (as a *device*, via the entity registry --
+   *  see `_loadCompletionHistory`, which populates
+   *  `_completionEntityIdsByZone`), the zone name, and the literal
+   *  "last_completed" suffix Navimower bakes into these entity IDs (plus
+   *  an optional `_2`/`_3` collision suffix). Nothing else -- no
+   *  `zone_name` attribute check, no guessing a mower "prefix" out of
+   *  this card's own `entity` config (that broke whenever the schedule
+   *  sensor's slug picked up an unrelated word, e.g. "garten" from an
+   *  area, that the completion sensors' own IDs never had). The first
+   *  matching entity found (alphabetically) is used. */
   _findLastCompleted(zoneId, zoneName = null) {
     if (!this._hass || !this._config) return null;
     const states = this._hass.states;
@@ -364,35 +370,44 @@ class NavimowZoneIntervalCard extends HTMLElement {
 
     if (!wantedName) return null;
 
-    const schedulePrefix = String(this._config.entity || "")
-      .replace(/^sensor\./, "")
-      .replace(/_schedule$/, "");
-    const prefix = `sensor.${schedulePrefix}_`;
-    const completedPattern = /_last_completed(?:_\d+)?$/;
+    // Device-scoped candidate list, populated asynchronously once the
+    // entity registry has loaded (see _loadCompletionHistory). Until
+    // that first resolves, fall back to an unscoped (still
+    // zone-slug-matched) scan of live states so the row doesn't just sit
+    // at "never completed" for the first tick or two after the card
+    // mounts.
+    const scoped = this._completionEntityIdsByZone && this._completionEntityIdsByZone[wantedName];
+    const candidates = scoped && scoped.length ? scoped : this._liveCompletionCandidates(zoneName);
 
-    // Entity IDs are deliberately NOT linked by zone ID. Navimower can expose
-    // IDs such as sensor.eltern_zone_1_last_completed_3 after Home Assistant
-    // adds a collision suffix. The authoritative link is mower prefix +
-    // zone_name attribute.
-    let best = null;
-    let bestTs = -Infinity;
-    for (const eid of Object.keys(states)) {
-      if (!eid.startsWith(prefix) || !completedPattern.test(eid)) continue;
+    for (const eid of candidates) {
       const st = states[eid];
-      const name = st.attributes && st.attributes.zone_name;
-      if (name == null || String(name).trim().toLocaleLowerCase() !== wantedName) continue;
-      if (["unknown", "unavailable", ""].includes(st.state)) continue;
-      const ts = Date.parse(st.state);
-      const score = Number.isFinite(ts) ? ts : -Infinity;
-      if (!best || score > bestTs) {
-        best = st;
-        bestTs = score;
-      }
+      if (st && !["unknown", "unavailable", ""].includes(st.state)) return st;
     }
-    if (best) return best;
+    // None of the candidates currently have a live state -- fall back to
+    // whichever one has Recorder history, in the same first-found order.
+    for (const eid of candidates) {
+      const historical = this._completionHistoryByEntity && this._completionHistoryByEntity[eid];
+      if (historical) return historical;
+    }
+    return null;
+  }
 
-    // Recorder-only fallback populated by _loadCompletionHistory.
-    return this._completionHistoryByName?.[wantedName] || null;
+  /** Escape a slug for use inside a RegExp. */
+  _escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** Immediate, device-unaware fallback for `_findLastCompleted`: any
+   *  live sensor entity whose ID ends in `_<zoneSlug>_last_completed`
+   *  (optionally with a collision suffix). Used only until the
+   *  device-scoped list from the entity registry has loaded. */
+  _liveCompletionCandidates(zoneName) {
+    const zoneSlug = this._slugifyZoneName(zoneName);
+    if (!zoneSlug) return [];
+    const pattern = new RegExp(`_${this._escapeRegExp(zoneSlug)}_last_completed(?:_\\d+)?$`);
+    return Object.keys(this._hass.states)
+      .filter((eid) => eid.startsWith("sensor.") && pattern.test(eid))
+      .sort();
   }
 
   /** Look up a user-configured override for a (already normalized,
@@ -414,6 +429,20 @@ class NavimowZoneIntervalCard extends HTMLElement {
       .replace(/^_+|_+$/g, "");
   }
 
+  /** Loads two things from Home Assistant's entity registry + Recorder,
+   *  asynchronously (both need a WS round trip the synchronous render
+   *  path doesn't have):
+   *
+   *  1. `_completionEntityIdsByZone`: for each zone, every completion
+   *     sensor entity_id matched purely by device (same physical mower as
+   *     this card's configured Schedule sensor) + the zone-name slug
+   *     immediately preceding "_last_completed" in the entity ID. This is
+   *     the device-scoped candidate list `_findLastCompleted` prefers.
+   *  2. `_completionHistoryByEntity`: for every candidate entity (plus any
+   *     configured overrides) that has *no current live state* (e.g.
+   *     disabled by default in the registry), its newest Recorder row --
+   *     so the row can still say "4 days ago" instead of "never
+   *     completed" purely because the sensor happens to be disabled. */
   async _loadCompletionHistory(zones) {
     if (!this._hass || !this._config || !this._hass.callWS || !Array.isArray(zones)) return;
     const overrides = this._config.entity_overrides || {};
@@ -429,41 +458,37 @@ class NavimowZoneIntervalCard extends HTMLElement {
       const entries = Array.isArray(registry && registry.entities) ? registry.entities : [];
       const scheduleEntry = entries.find((e) => e.entity_id === this._config.entity);
       const deviceId = scheduleEntry && scheduleEntry.device_id;
-      const schedulePrefix = String(this._config.entity || "")
-        .replace(/^sensor\./, "")
-        .replace(/_schedule$/, "");
-      const prefix = `sensor.${schedulePrefix}_`;
-      const completedPattern = /_last_completed(?:_\d+)?$/;
-      const norm = (value) => String(value == null ? "" : value).trim().toLocaleLowerCase();
 
-      // Discover ALL completion entities belonging to this mower first.
-      // Entity-ID collision suffixes such as _2/_3 are intentionally accepted.
-      const completionEntries = entries.filter((e) => {
-        if (!e || !e.entity_id || !e.entity_id.startsWith(prefix)) return false;
-        if (!completedPattern.test(e.entity_id)) return false;
-        if (deviceId && e.device_id && e.device_id !== deviceId) return false;
-        return true;
-      });
-
-      const candidates = new Map();
+      // Purely device + zone-slug matched -- no zone_name attribute, no
+      // original_name comparison. See _findLastCompleted's doc comment
+      // for why (a schedule-entity-slug-derived "prefix" used to be part
+      // of this and broke whenever that slug picked up an unrelated
+      // word, e.g. an area name).
+      const entityIdsByZone = {};
       for (const zone of zones) {
-        const wantedName = norm(zone.name);
-        if (!wantedName) continue;
-        const matches = completionEntries
-          .filter((e) => norm(e.original_name || e.name) === `${wantedName} last completed`)
-          .map((e) => e.entity_id);
-        if (matches.length) candidates.set(wantedName, [...new Set(matches)]);
+        const zoneSlug = this._slugifyZoneName(zone.name);
+        if (!zoneSlug) continue;
+        const pattern = new RegExp(`_${this._escapeRegExp(zoneSlug)}_last_completed(?:_\\d+)?$`);
+        const matches = entries
+          .filter((e) => {
+            if (!e || !e.entity_id || !e.entity_id.startsWith("sensor.")) return false;
+            if (!pattern.test(e.entity_id)) return false;
+            if (deviceId && e.device_id && e.device_id !== deviceId) return false;
+            return true;
+          })
+          .map((e) => e.entity_id)
+          .sort();
+        if (matches.length) entityIdsByZone[this._zoneKeyLocal(zone.name)] = matches;
       }
+      this._completionEntityIdsByZone = entityIdsByZone;
 
-      // Explicit overrides are pinned to one exact entity_id -- fetch
-      // their history too, independent of whether they match the
-      // mower-prefix / zone_name auto-discovery pattern at all (the
-      // whole point of an override is that it might not).
       const overrideEntityIds = [...new Set(Object.values(overrides).filter(Boolean).map(String))];
-
-      const entityIds = [...new Set([...candidates.values()].flat(), ...overrideEntityIds)];
+      const entityIds = [
+        ...new Set([...Object.values(entityIdsByZone).flat(), ...overrideEntityIds]),
+      ];
       if (!entityIds.length) {
         this._completionHistorySignature = signature;
+        this._render();
         return;
       }
 
@@ -487,31 +512,17 @@ class NavimowZoneIntervalCard extends HTMLElement {
           const ts = Date.parse(row.last_changed || row.last_updated || value);
           if (!Number.isFinite(ts) || ts <= bestTs) continue;
           bestTs = ts;
-          best = { value, ts };
+          best = value;
         }
         return best;
       };
 
-      for (const [zoneName, ids] of candidates.entries()) {
-        let best = null;
-        let bestTs = -Infinity;
-        for (const entityId of ids) {
-          const row = newestRow(entityId);
-          if (!row || row.ts <= bestTs) continue;
-          bestTs = row.ts;
-          best = { entity_id: entityId, state: row.value, attributes: { zone_name: zoneName } };
+      this._completionHistoryByEntity = {};
+      for (const entityId of entityIds) {
+        const value = newestRow(entityId);
+        if (value) {
+          this._completionHistoryByEntity[entityId] = { entity_id: entityId, state: value, attributes: {} };
         }
-        if (best) {
-          this._completionHistoryByName = this._completionHistoryByName || {};
-          this._completionHistoryByName[zoneName] = best;
-        }
-      }
-
-      for (const entityId of overrideEntityIds) {
-        const row = newestRow(entityId);
-        if (!row) continue;
-        this._completionHistoryByEntity = this._completionHistoryByEntity || {};
-        this._completionHistoryByEntity[entityId] = { entity_id: entityId, state: row.value, attributes: {} };
       }
 
       this._completionHistorySignature = signature;
@@ -521,6 +532,11 @@ class NavimowZoneIntervalCard extends HTMLElement {
     } finally {
       this._completionHistoryLoading = false;
     }
+  }
+
+  /** Same normalization `_overrideEntityId` keys are looked up by. */
+  _zoneKeyLocal(name) {
+    return String(name == null ? "" : name).trim().toLocaleLowerCase();
   }
 
   /** Find the "<zone> mow interval" number entity by its zone_id attribute,
@@ -977,24 +993,27 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
 
   /** Best-effort preview of what the card would auto-detect for a zone
    *  right now, shown as helper text so the user can judge whether an
-   *  override is actually necessary. This intentionally mirrors only the
-   *  live-state half of the card's `_findLastCompleted` (prefix +
-   *  zone_name attribute match) -- the Recorder-history fallback isn't
-   *  worth reproducing here just for a hint. */
+   *  override is actually necessary. Mirrors the card's own fallback
+   *  live-state scan (zone-slug + "_last_completed" suffix, first match
+   *  alphabetically) -- the editor has no cheap way to also scope by
+   *  device the way the card does once its registry fetch resolves, so
+   *  this is intentionally just a hint, not authoritative. */
   _autoDetectedEntityId(zoneName) {
-    if (!this._hass || !this._config || !this._config.entity) return null;
-    const wanted = this._zoneKey(zoneName);
-    if (!wanted) return null;
-    const schedulePrefix = String(this._config.entity).replace(/^sensor\./, "").replace(/_schedule$/, "");
-    const prefix = `sensor.${schedulePrefix}_`;
-    const pattern = /_last_completed(?:_\d+)?$/;
+    if (!this._hass) return null;
+    const zoneSlug = String(zoneName == null ? "" : zoneName)
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLocaleLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!zoneSlug) return null;
+    const escaped = zoneSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`_${escaped}_last_completed(?:_\\d+)?$`);
     const states = this._hass.states;
-    for (const eid of Object.keys(states)) {
-      if (!eid.startsWith(prefix) || !pattern.test(eid)) continue;
-      const name = states[eid].attributes && states[eid].attributes.zone_name;
-      if (name != null && this._zoneKey(name) === wanted) return eid;
-    }
-    return null;
+    const matches = Object.keys(states)
+      .filter((eid) => eid.startsWith("sensor.") && pattern.test(eid))
+      .sort();
+    return matches[0] || null;
   }
 
   _computeSchema() {
