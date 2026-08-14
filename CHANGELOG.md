@@ -1,3 +1,28 @@
+## 1.3.16
+- More stable "last completed" sensor discovery: entity IDs such as
+  `sensor.garten_eltern_birnbaum_last_completed` now also match by the
+  zone-name slug embedded in the entity ID itself, not only by the
+  sensor's `zone_name` attribute / entity-registry `original_name`.
+  Covers cases where the attribute is missing/stale or a zone was renamed
+  after the completion sensor was first created -- both backend
+  (`service.py`, used by `mow_due_zones`/`save_due_schedule`/the due-zone
+  sensor) and the card's own JS discovery are updated.
+- `_norm_name` now strips diacritics (matching `_slugify_zone_name`), so
+  an umlaut/accent in a zone name can no longer make the attribute match
+  and the ID-slug match disagree.
+- Card + visual editor: new "Advanced entity overrides" section (a
+  collapsed-by-default panel) in the dashboard card's visual editor,
+  listing every zone on the configured Schedule sensor with an entity
+  picker to pin a specific "last completed" sensor for that zone,
+  overriding automatic discovery when it's ambiguous or unreliable. Each
+  field's helper text shows what the card currently auto-detects for that
+  zone, so it's easy to see whether an override is actually needed.
+  Stored as `entity_overrides: {<zone name, lowercased>: entity_id}` in
+  the card config. Only affects this card's display/Mow-now/preview --
+  not the backend services or the due-zone sensor, which keep using their
+  own auto-discovery.
+- Bundled card version bumped to v1.3.16.
+
 ## 1.3.15
 - Fix card bug: `navimow-zone-interval-card` referenced `this._scheduleEntity`, which was never assigned anywhere -- always `undefined`. This silently disabled the strong `source_entity` + `zone_name` match in `_findInterval`, so the card fell back to matching by zone name alone across *all* mowers' interval entities. Two mowers sharing a zone name (e.g. both have "Birnbaum") could end up sharing the same underlying `number.*_mow_interval` entity: dragging the slider on one card's zone also changed the other mower's same-named zone.
 - Now correctly scopes the match to `this._config.entity` (the schedule sensor this specific card is configured against), same as `_findLastCompleted` already did.

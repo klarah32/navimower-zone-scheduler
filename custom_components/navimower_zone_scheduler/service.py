@@ -213,7 +213,20 @@ def _interval_days(hass: HomeAssistant, interval_entity: str) -> float | None:
 
 
 def _norm_name(value: Any) -> str:
-    return str(value or "").strip().casefold()
+    """Casefold + strip diacritics so e.g. "Birnbaum" / "birnbäum" line up.
+
+    Previously this only trimmed/casefolded, while `_slugify_zone_name`
+    (used for entity-ID matching) also stripped diacritics. That mismatch
+    meant an umlaut/accent in a zone name could make the attribute-based
+    match fail while the slug-based match succeeded, or vice versa --
+    exactly the kind of "sometimes it finds it, sometimes it doesn't"
+    instability this normalizes away.
+    """
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.strip().casefold()
 
 
 def _slugify_zone_name(value: Any) -> str:
@@ -227,6 +240,27 @@ def _slugify_zone_name(value: Any) -> str:
     return text
 
 
+def _entity_id_zone_slug(entity_id: str, prefix: str) -> str | None:
+    """Extract the zone-name slug embedded in a completion entity ID.
+
+    E.g. given ``sensor.garten_eltern_birnbaum_last_completed`` (or an
+    ``_last_completed_2``-style collision-suffixed variant) and the
+    mower's ``sensor.garten_eltern_`` prefix, returns ``"birnbaum"``.
+
+    Navimower bakes the zone name into the entity ID at creation time, so
+    this is a match that doesn't depend on the ``zone_name`` attribute or
+    the registry's ``original_name`` being present/current at all -- both
+    of which can go stale (attribute missing on some integration
+    versions, original_name frozen from before a zone rename) and are
+    exactly what made discovery "sometimes" find the right sensor.
+    """
+    if not entity_id.startswith(prefix):
+        return None
+    remainder = entity_id[len(prefix):]
+    remainder = re.sub(r"_last_completed(?:_\d+)?$", "", remainder)
+    return remainder or None
+
+
 def _last_completed_state(
     hass: HomeAssistant, schedule_entity: str, zone_name: str | None = None
 ) -> Any | None:
@@ -235,12 +269,15 @@ def _last_completed_state(
     Navimower can create entity IDs such as
     ``sensor.eltern_zone_1_last_completed_3``. The numeric zone ID in that
     entity ID is not a reliable link to the current schedule zone. The
-    reliable relationship is the mower prefix plus the sensor's ``zone_name``
-    attribute.
+    primary relationship is the mower prefix plus the sensor's
+    ``zone_name`` attribute; as a fallback (attribute missing/stale) the
+    zone name slug embedded in the entity ID itself is also accepted --
+    see `_entity_id_zone_slug`.
     """
     wanted_name = _norm_name(zone_name)
     if not wanted_name:
         return None
+    wanted_slug = _slugify_zone_name(zone_name)
 
     schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
     prefix = f"sensor.{schedule_prefix}_"
@@ -252,7 +289,9 @@ def _last_completed_state(
         eid = state.entity_id
         if not eid.startswith(prefix) or not pattern.search(eid):
             continue
-        if _norm_name(state.attributes.get("zone_name")) != wanted_name:
+        matches_attr = _norm_name(state.attributes.get("zone_name")) == wanted_name
+        matches_id = bool(wanted_slug) and _entity_id_zone_slug(eid, prefix) == wanted_slug
+        if not (matches_attr or matches_id):
             continue
         value = str(state.state or "")
         if value in ("unknown", "unavailable", ""):
@@ -269,11 +308,21 @@ def _last_completed_state(
 def _registry_completion_entities(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
 ) -> list[str]:
-    """Find all registered completion sensors for this mower + zone name."""
+    """Find all registered completion sensors for this mower + zone name.
+
+    This is the path used for disabled-by-default entities (no live
+    state, so `_last_completed_state` above can't see them) and for
+    Recorder-only history. `original_name` is frozen at entity-creation
+    time, so a zone renamed afterwards silently breaks the name-based
+    match here; the entity-ID zone slug doesn't have that problem since
+    it's checked against the *current* zone name, so it's included as an
+    equally-valid match rather than a last-resort.
+    """
     registry = er.async_get(hass)
     schedule_entry = registry.async_get(schedule_entity)
     device_id = schedule_entry.device_id if schedule_entry else None
     wanted_name = _norm_name(zone_name)
+    wanted_slug = _slugify_zone_name(zone_name)
     schedule_prefix = schedule_entity.removeprefix("sensor.").removesuffix("_schedule")
     prefix = f"sensor.{schedule_prefix}_"
     pattern = re.compile(r"_last_completed(?:_\d+)?$")
@@ -287,7 +336,9 @@ def _registry_completion_entities(
         if not pattern.search(entry.entity_id):
             continue
         original = _norm_name(entry.original_name or entry.name)
-        if wanted_name and original == f"{wanted_name} last completed":
+        matches_name = bool(wanted_name) and original == f"{wanted_name} last completed"
+        matches_id = bool(wanted_slug) and _entity_id_zone_slug(entry.entity_id, prefix) == wanted_slug
+        if matches_name or matches_id:
             result.append(entry.entity_id)
 
     return list(dict.fromkeys(result))

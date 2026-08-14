@@ -72,9 +72,22 @@
  *   device_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # needed to Save/Mow-now
  *   start: "09:00"                    # optional, preview/save window start
  *   end: "20:00"                      # optional, preview/save window end
+ *   entity_overrides:                 # optional, see below
+ *     birnbaum: sensor.garten_eltern_birnbaum_last_completed_2
+ *
+ * entity_overrides pins a zone's "last completed" sensor explicitly,
+ * bypassing the automatic mower-prefix + zone_name match in
+ * _findLastCompleted() below. Keyed by the zone's name, trimmed and
+ * lower-cased (accents/case differences in the key itself still need to
+ * match -- the visual editor's "Advanced entity overrides" panel writes
+ * this for you, so hand-editing YAML this way is normally unnecessary).
+ * Only affects what this card displays/computes (age, overdue highlight,
+ * Mow-now, the 7-day preview); the navimower_zone_scheduler.mow_due_zones
+ * / save_due_schedule services and the due-zones sensor still use their
+ * own backend auto-discovery in service.py and don't see this override.
  */
 
-const CARD_VERSION = "1.3.15"
+const CARD_VERSION = "1.3.16"
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {
@@ -330,6 +343,25 @@ class NavimowZoneIntervalCard extends HTMLElement {
     if (!this._hass || !this._config) return null;
     const states = this._hass.states;
     const wantedName = zoneName == null ? "" : String(zoneName).trim().toLocaleLowerCase();
+
+    // An explicit override (set via the editor's "Advanced entity
+    // overrides" panel) always wins over automatic discovery -- the user
+    // picked it specifically because the automatic match was wrong or
+    // unreliable for this zone.
+    const overrideEntityId = this._overrideEntityId(wantedName);
+    if (overrideEntityId) {
+      const overrideState = states[overrideEntityId];
+      if (overrideState && !["unknown", "unavailable", ""].includes(overrideState.state)) {
+        return overrideState;
+      }
+      // The overridden entity has no usable live state (e.g. it's
+      // disabled by default in the entity registry) -- fall back to its
+      // own Recorder history rather than silently reverting to automatic
+      // discovery, so the user's explicit choice is still honored.
+      const historical = this._completionHistoryByEntity?.[overrideEntityId];
+      if (historical) return historical;
+    }
+
     if (!wantedName) return null;
 
     const schedulePrefix = String(this._config.entity || "")
@@ -363,6 +395,16 @@ class NavimowZoneIntervalCard extends HTMLElement {
     return this._completionHistoryByName?.[wantedName] || null;
   }
 
+  /** Look up a user-configured override for a (already normalized,
+   *  lower-cased/trimmed) zone name. Returns the entity_id string, or
+   *  null if no override is set for that zone. */
+  _overrideEntityId(normalizedZoneName) {
+    if (!normalizedZoneName) return null;
+    const overrides = (this._config && this._config.entity_overrides) || {};
+    const entityId = overrides[normalizedZoneName];
+    return entityId ? String(entityId) : null;
+  }
+
   _slugifyZoneName(value) {
     return String(value == null ? "" : value)
       .normalize("NFKD")
@@ -374,7 +416,11 @@ class NavimowZoneIntervalCard extends HTMLElement {
 
   async _loadCompletionHistory(zones) {
     if (!this._hass || !this._config || !this._hass.callWS || !Array.isArray(zones)) return;
-    const signature = zones.map((z) => `${z.id}:${z.name || ""}`).join("|");
+    const overrides = this._config.entity_overrides || {};
+    const signature =
+      zones.map((z) => `${z.id}:${z.name || ""}`).join("|") +
+      "::" +
+      Object.entries(overrides).map(([k, v]) => `${k}=${v}`).sort().join("|");
     if (signature === this._completionHistorySignature || this._completionHistoryLoading) return;
     this._completionHistoryLoading = true;
 
@@ -409,7 +455,13 @@ class NavimowZoneIntervalCard extends HTMLElement {
         if (matches.length) candidates.set(wantedName, [...new Set(matches)]);
       }
 
-      const entityIds = [...new Set([...candidates.values()].flat())];
+      // Explicit overrides are pinned to one exact entity_id -- fetch
+      // their history too, independent of whether they match the
+      // mower-prefix / zone_name auto-discovery pattern at all (the
+      // whole point of an override is that it might not).
+      const overrideEntityIds = [...new Set(Object.values(overrides).filter(Boolean).map(String))];
+
+      const entityIds = [...new Set([...candidates.values()].flat(), ...overrideEntityIds)];
       if (!entityIds.length) {
         this._completionHistorySignature = signature;
         return;
@@ -424,29 +476,42 @@ class NavimowZoneIntervalCard extends HTMLElement {
         significant_changes_only: false,
       });
 
+      const newestRow = (entityId) => {
+        const rows = history && history[entityId];
+        if (!Array.isArray(rows)) return null;
+        let best = null;
+        let bestTs = -Infinity;
+        for (const row of rows) {
+          const value = row && row.state;
+          if (!value || ["unknown", "unavailable"].includes(value)) continue;
+          const ts = Date.parse(row.last_changed || row.last_updated || value);
+          if (!Number.isFinite(ts) || ts <= bestTs) continue;
+          bestTs = ts;
+          best = { value, ts };
+        }
+        return best;
+      };
+
       for (const [zoneName, ids] of candidates.entries()) {
         let best = null;
         let bestTs = -Infinity;
         for (const entityId of ids) {
-          const rows = history && history[entityId];
-          if (!Array.isArray(rows)) continue;
-          for (const row of rows) {
-            const value = row && row.state;
-            if (!value || ["unknown", "unavailable"].includes(value)) continue;
-            const ts = Date.parse(row.last_changed || row.last_updated || value);
-            if (!Number.isFinite(ts) || ts <= bestTs) continue;
-            bestTs = ts;
-            best = {
-              entity_id: entityId,
-              state: value,
-              attributes: { zone_name: zoneName },
-            };
-          }
+          const row = newestRow(entityId);
+          if (!row || row.ts <= bestTs) continue;
+          bestTs = row.ts;
+          best = { entity_id: entityId, state: row.value, attributes: { zone_name: zoneName } };
         }
         if (best) {
           this._completionHistoryByName = this._completionHistoryByName || {};
           this._completionHistoryByName[zoneName] = best;
         }
+      }
+
+      for (const entityId of overrideEntityIds) {
+        const row = newestRow(entityId);
+        if (!row) continue;
+        this._completionHistoryByEntity = this._completionHistoryByEntity || {};
+        this._completionHistoryByEntity[entityId] = { entity_id: entityId, state: row.value, attributes: {} };
       }
 
       this._completionHistorySignature = signature;
@@ -850,7 +915,24 @@ class NavimowZoneIntervalCard extends HTMLElement {
 
 customElements.define("navimow-zone-interval-card", NavimowZoneIntervalCard);
 
-/** Minimal ha-form based visual editor. */
+/** Minimal ha-form based visual editor.
+ *
+ * In addition to the static fields (entity/title/device_id/start/end),
+ * this builds one extra, *dynamic* schema entry per zone found on the
+ * currently configured Schedule sensor, nested inside a collapsible
+ * "Advanced entity overrides" expansion panel (HA's built-in `expandable`
+ * form-schema type -- collapsed by default, so it stays out of the way
+ * unless someone actually needs it). Each field is an entity picker that
+ * lets the user pin a specific "last completed" sensor for that zone,
+ * overriding the card's automatic mower-prefix + zone_name discovery
+ * (see `_findLastCompleted` / `_overrideEntityId` on the card class
+ * above) -- useful when that automatic match is ambiguous or wrong for a
+ * particular zone, without having to hand-edit YAML.
+ *
+ * The panel's data lands in `config.entity_overrides`, keyed by each
+ * zone's name (trimmed, lower-cased -- see `_zoneKey`), matching exactly
+ * how the card's own `_overrideEntityId` looks the value up.
+ */
 class NavimowZoneIntervalCardEditor extends HTMLElement {
   setConfig(config) {
     this._config = config || {};
@@ -859,11 +941,122 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (this._form) this._form.hass = hass;
+    if (!this._form) return;
+    this._form.hass = hass;
+    // Re-derive the per-zone override schema when the set of zones on the
+    // configured Schedule sensor actually changes (new mower selected, a
+    // zone added/removed/renamed on the mower) -- not on every single
+    // hass push, which would otherwise reassign `.schema` every few
+    // seconds while a mower is active and risk disrupting an in-progress
+    // entity-picker interaction.
+    const signature = this._zoneSignature();
+    if (signature !== this._lastZoneSignature) {
+      this._lastZoneSignature = signature;
+      this._form.schema = this._computeSchema();
+    }
   }
 
   connectedCallback() {
     this._render();
+  }
+
+  _zones() {
+    const entity = this._config && this._config.entity;
+    const stateObj = entity && this._hass && this._hass.states[entity];
+    const zones = (stateObj && stateObj.attributes && stateObj.attributes.zones) || [];
+    return zones.filter((z) => z && z.name);
+  }
+
+  _zoneSignature() {
+    return this._zones().map((z) => z.name).join("|");
+  }
+
+  _zoneKey(name) {
+    return String(name == null ? "" : name).trim().toLocaleLowerCase();
+  }
+
+  /** Best-effort preview of what the card would auto-detect for a zone
+   *  right now, shown as helper text so the user can judge whether an
+   *  override is actually necessary. This intentionally mirrors only the
+   *  live-state half of the card's `_findLastCompleted` (prefix +
+   *  zone_name attribute match) -- the Recorder-history fallback isn't
+   *  worth reproducing here just for a hint. */
+  _autoDetectedEntityId(zoneName) {
+    if (!this._hass || !this._config || !this._config.entity) return null;
+    const wanted = this._zoneKey(zoneName);
+    if (!wanted) return null;
+    const schedulePrefix = String(this._config.entity).replace(/^sensor\./, "").replace(/_schedule$/, "");
+    const prefix = `sensor.${schedulePrefix}_`;
+    const pattern = /_last_completed(?:_\d+)?$/;
+    const states = this._hass.states;
+    for (const eid of Object.keys(states)) {
+      if (!eid.startsWith(prefix) || !pattern.test(eid)) continue;
+      const name = states[eid].attributes && states[eid].attributes.zone_name;
+      if (name != null && this._zoneKey(name) === wanted) return eid;
+    }
+    return null;
+  }
+
+  _computeSchema() {
+    const zones = this._zones();
+    this._zoneLabelByKey = {};
+    const overrideSchema = zones.map((z) => {
+      const key = this._zoneKey(z.name);
+      this._zoneLabelByKey[key] = z.name;
+      return { name: key, selector: { entity: { domain: "sensor" } } };
+    });
+
+    const schema = [...NavimowZoneIntervalCardEditor.BASE_SCHEMA];
+    if (overrideSchema.length) {
+      schema.push({
+        name: "entity_overrides",
+        type: "expandable",
+        title: "Advanced entity overrides",
+        icon: "mdi:tune",
+        schema: overrideSchema,
+      });
+    }
+    return schema;
+  }
+
+  _computeLabel(schema) {
+    if (schema.name === "entity_overrides") return "Advanced entity overrides";
+    if (this._zoneLabelByKey && Object.prototype.hasOwnProperty.call(this._zoneLabelByKey, schema.name)) {
+      return `${this._zoneLabelByKey[schema.name]} \u2013 last completed sensor`;
+    }
+    return NavimowZoneIntervalCardEditor.LABELS[schema.name] || schema.name;
+  }
+
+  _computeHelper(schema) {
+    if (schema.name === "entity_overrides") {
+      return (
+        "Only needed if a zone's automatically matched \u201clast completed\u201d sensor " +
+        "is missing or unreliable. Leave a zone blank to keep automatic discovery."
+      );
+    }
+    if (this._zoneLabelByKey && Object.prototype.hasOwnProperty.call(this._zoneLabelByKey, schema.name)) {
+      const auto = this._autoDetectedEntityId(this._zoneLabelByKey[schema.name]);
+      return auto ? `Auto-detected: ${auto}` : "No sensor auto-detected for this zone yet.";
+    }
+    return undefined;
+  }
+
+  /** Drop empty/cleared override entries so config stays tidy instead of
+   *  accumulating `{"birnbaum": ""}` clutter, and drop the whole
+   *  `entity_overrides` key once nothing is left in it. */
+  _pruneEmptyOverrides(config) {
+    if (!config || !config.entity_overrides) return config;
+    const cleaned = {};
+    for (const [key, value] of Object.entries(config.entity_overrides)) {
+      if (value) cleaned[key] = value;
+    }
+    const next = { ...config };
+    if (Object.keys(cleaned).length) {
+      next.entity_overrides = cleaned;
+    } else {
+      delete next.entity_overrides;
+    }
+    return next;
   }
 
   _render() {
@@ -871,11 +1064,11 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
     if (!this._form) {
       this.innerHTML = `<ha-form></ha-form>`;
       this._form = this.querySelector("ha-form");
-      this._form.computeLabel = (schema) =>
-        NavimowZoneIntervalCardEditor.LABELS[schema.name] || schema.name;
+      this._form.computeLabel = (schema) => this._computeLabel(schema);
+      this._form.computeHelper = (schema) => this._computeHelper(schema);
       this._form.addEventListener("value-changed", (ev) => {
         ev.stopPropagation();
-        this._config = ev.detail.value;
+        this._config = this._pruneEmptyOverrides(ev.detail.value);
         this.dispatchEvent(
           new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true })
         );
@@ -883,11 +1076,12 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
     }
     if (this._hass) this._form.hass = this._hass;
     this._form.data = this._config;
-    this._form.schema = NavimowZoneIntervalCardEditor.SCHEMA;
+    this._lastZoneSignature = this._zoneSignature();
+    this._form.schema = this._computeSchema();
   }
 }
 
-NavimowZoneIntervalCardEditor.SCHEMA = [
+NavimowZoneIntervalCardEditor.BASE_SCHEMA = [
   { name: "entity", required: true, selector: { entity: { domain: "sensor" } } },
   { name: "title", selector: { text: {} } },
   { name: "device_id", selector: { device: { integration: "navimower" } } },
