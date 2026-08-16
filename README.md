@@ -1,5 +1,13 @@
 # NaviMower Zone Scheduler
 
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![Version](https://img.shields.io/github/v/release/klarah32/navimower-zone-scheduler?label=version)](https://github.com/klarah32/navimower-zone-scheduler/releases)
+
+Current version: **1.3.17** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
+HACS reads this same version from `manifest.json`, so it also shows up next
+to the repo in HACS's integration list and on this repo's GitHub Releases
+page -- no separate place to keep in sync.
+
 A standalone Home Assistant integration that adds a **"&lt;zone&gt; mow
 interval"** slider (`number` entity, 0–7 days) for every zone of a
 [NaviMower](https://github.com/vahesoo/NaviMower)-managed mower, plus a
@@ -52,6 +60,10 @@ repository** first:
    **"NaviMower Zone Scheduler"**.
 6. Pick the target mower's Schedule sensor (e.g. `sensor.gerd_schedule`).
 7. Repeat step 5–6 once per mower -- one config entry = one mower.
+8. **Hard-refresh the browser tab** (Ctrl+Shift+R / Cmd+Shift+R, or clear
+   the site cache) before opening the dashboard. The card JS is served
+   from a fixed URL, so a browser that already cached an older copy won't
+   pick up the new version on a normal reload.
 
 ## Installing manually (no HACS)
 
@@ -62,6 +74,10 @@ repository** first:
    `config/custom_components/navimower_zone_scheduler/manifest.json`.
 3. **Restart Home Assistant.**
 4. Same as HACS steps 5–7 above.
+5. **Hard-refresh the browser tab** (Ctrl+Shift+R / Cmd+Shift+R, or clear
+   the site cache) before opening the dashboard -- same reason as the HACS
+   step above: the card JS URL doesn't change between versions, so a stale
+   browser cache can otherwise keep serving the old card.
 
 ## Adding the card to a dashboard
 
@@ -273,6 +289,10 @@ Via HACS: HACS will flag new releases like any other repo -- Update from
 there, then restart (so the new card JS gets served). Manually: repeat the
 "Installing manually" steps, overwriting the whole folder including `www/`,
 then restart.
+
+**After updating, hard-refresh the browser** (Ctrl+Shift+R / Cmd+Shift+R)
+on any tab showing the dashboard, or the card can keep running the old
+cached JS even though the backend and HACS both report the new version.
 
 ## Uninstalling
 
