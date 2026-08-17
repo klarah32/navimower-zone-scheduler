@@ -1,3 +1,27 @@
+## 1.3.18
+- Fixed a startup race: on a full Home Assistant restart, this integration
+  (no cloud I/O of its own) routinely finished setting up before
+  `navimower`'s own cloud-backed Schedule sensor had its first update,
+  which meant zone entities briefly (and sometimes not-so-briefly) didn't
+  exist, and any boot-time automation calling `get_due_zones` /
+  `mow_due_zones` / `save_due_schedule` could fail with "Schedule entity
+  not found".
+- Added `after_dependencies: [navimower]` to `manifest.json` so Home
+  Assistant prefers setting up `navimower` first when both are present.
+- `async_setup_entry` now polls briefly (up to ~10s) for the configured
+  Schedule sensor to report a usable `zones` attribute before continuing.
+  If it's still not there, the config entry raises `ConfigEntryNotReady`
+  so Home Assistant retries the entry on its own backoff schedule (visible
+  under Settings -> Devices & Services as "not ready, retrying") instead
+  of finishing "successfully" with zero zone entities.
+- The `Mow Due Zones` sensor no longer raises out of its periodic/event
+  update when the schedule entity is briefly unavailable (e.g. navimower
+  reloading later); it now just skips that update and retries on the next
+  event or the 1-minute interval.
+- Clarified the `HomeAssistantError` messages from `get_due_zones` /
+  `mow_due_zones` / `save_due_schedule` to call out the startup-race case
+  explicitly, for anyone still hitting it from their own automations.
+
 ## 1.3.17
 - Fixed the actual root cause of unreliable "last completed" discovery:
   both the backend (`service.py`) and the card were deriving a mower

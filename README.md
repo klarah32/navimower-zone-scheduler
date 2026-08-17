@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/klarah32/navimower-zone-scheduler?label=version)](https://github.com/klarah32/navimower-zone-scheduler/releases)
 
-Current version: **1.3.17** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
+Current version: **1.3.18** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
 HACS reads this same version from `manifest.json`, so it also shows up next
 to the repo in HACS's integration list and on this repo's GitHub Releases
 page -- no separate place to keep in sync.
@@ -282,6 +282,19 @@ Also enable NaviMower's own `sensor.<zone> last completed` entities
 (Settings → Devices & Services → the mower → Entities → filter "Disabled")
 -- they're off by default in NaviMower itself, and the card uses them to
 show how overdue a zone is.
+
+## Startup timing
+
+This integration has no cloud calls of its own, so on a full Home
+Assistant restart it can be ready before `navimower`'s own Schedule
+sensor has its first update. As of 1.3.18 it waits briefly for that
+sensor to have usable zone data before finishing setup, and retries
+automatically (with backoff, visible under Settings -> Devices &
+Services) if it's still not there. If you have your **own** automation
+that calls `get_due_zones` / `mow_due_zones` / `save_due_schedule` on
+Home Assistant startup, give it a short delay (or a `wait_for_trigger` on
+the schedule entity) first -- the config entry retrying doesn't help a
+service call made directly from your own automation.
 
 ## Updating
 

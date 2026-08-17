@@ -361,12 +361,20 @@ async def _eligible_zones(
     """
     schedule = hass.states.get(schedule_entity)
     if schedule is None:
-        raise HomeAssistantError(f"Schedule entity {schedule_entity!r} was not found")
+        raise HomeAssistantError(
+            f"Schedule entity {schedule_entity!r} was not found. If this "
+            "happened right after a Home Assistant restart, navimower may "
+            "still be loading -- add a short delay (or a wait_for_trigger "
+            "on that entity) before this action in a startup automation."
+        )
 
     zones = schedule.attributes.get("zones")
     if not isinstance(zones, list):
         raise HomeAssistantError(
-            f"Schedule entity {schedule_entity!r} has no usable 'zones' attribute"
+            f"Schedule entity {schedule_entity!r} has no usable 'zones' "
+            "attribute yet. If this happened right after a Home Assistant "
+            "restart, navimower may still be loading -- add a short delay "
+            "before this action in a startup automation."
         )
 
     today = dt_util.now().date()

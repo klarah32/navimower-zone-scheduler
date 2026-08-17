@@ -17,6 +17,8 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
+from homeassistant.exceptions import HomeAssistantError
+
 from .const import CONF_SCHEDULE_ENTITY
 from .service import _due_zone_details
 
@@ -119,7 +121,20 @@ class DueZonesSensor(SensorEntity):
 
     async def async_update(self) -> None:
         async with self._update_lock:
-            details = await _due_zone_details(self.hass, self._schedule_entity)
+            try:
+                details = await _due_zone_details(self.hass, self._schedule_entity)
+            except HomeAssistantError:
+                # Schedule entity not there right now (e.g. navimower still
+                # loading after a restart, or briefly reloading later).
+                # Leave the last-known state as-is; the next state-change
+                # event or the 1-minute interval will pick it back up once
+                # the entity is available again.
+                _LOGGER.debug(
+                    "Schedule entity %s unavailable, skipping due-zone update",
+                    self._schedule_entity,
+                    exc_info=True,
+                )
+                return
             due = details["due_zones"]
             self._attr_native_value = len(due)
             self._attr_extra_state_attributes = {

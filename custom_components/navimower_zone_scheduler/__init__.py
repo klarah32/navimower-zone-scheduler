@@ -13,14 +13,16 @@ registration -- so a HACS/manual install is enough on its own.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN
+from .const import CONF_SCHEDULE_ENTITY, DOMAIN
 from .service import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +32,27 @@ PLATFORMS = ["number", "sensor"]
 _CARD_FILENAME = "navimow-zone-interval-card.js"
 _CARD_URL_BASE = "/navimower_zone_scheduler_static"
 _CARD_URL = f"{_CARD_URL_BASE}/{_CARD_FILENAME}"
+
+# On a full HA restart, this integration (no heavy I/O of its own) routinely
+# finishes loading before navimower's own cloud-backed sensors exist yet,
+# even with after_dependencies set in manifest.json -- after_dependencies
+# only orders *setup*, it doesn't wait for navimower's first cloud poll to
+# land. Poll briefly for the schedule sensor to show up with usable data
+# before giving up and asking HA to retry the whole entry later, so a
+# normal restart doesn't need a slow backoff retry just to wait a few
+# seconds for another integration's first update.
+_STARTUP_POLL_ATTEMPTS = 10
+_STARTUP_POLL_INTERVAL = 1.0
+
+
+async def _wait_for_schedule_entity(hass: HomeAssistant, schedule_entity_id: str) -> bool:
+    """Return True once the schedule sensor has a usable `zones` attribute."""
+    for _ in range(_STARTUP_POLL_ATTEMPTS):
+        state = hass.states.get(schedule_entity_id)
+        if state is not None and isinstance(state.attributes.get("zones"), list):
+            return True
+        await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+    return False
 
 
 async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
@@ -84,6 +107,19 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    schedule_entity_id = entry.data[CONF_SCHEDULE_ENTITY]
+    if not await _wait_for_schedule_entity(hass, schedule_entity_id):
+        # Most likely a slow/still-loading navimower on this restart, but
+        # could also be a genuinely deleted/renamed entity -- either way,
+        # ConfigEntryNotReady makes HA retry this entry on its own backoff
+        # schedule (visible in Settings -> Devices & Services as "not
+        # ready, retrying") rather than the entry finishing "successfully"
+        # with zero zone entities that only fill in later.
+        raise ConfigEntryNotReady(
+            f"{schedule_entity_id} has no 'zones' data yet "
+            "(is the navimower integration still loading?)"
+        )
+
     await _async_register_card(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
