@@ -1,12 +1,8 @@
-# NaviMower Zone Scheduler
+# NaviMower Zone Scheduler Add-on (requires [NaviMower](https://github.com/vahesoo/NaviMower))
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/klarah32/navimower-zone-scheduler?label=version)](https://github.com/klarah32/navimower-zone-scheduler/releases)
 
-Current version: **1.3.18** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
-HACS reads this same version from `manifest.json`, so it also shows up next
-to the repo in HACS's integration list and on this repo's GitHub Releases
-page -- no separate place to keep in sync.
 
 A standalone Home Assistant integration that adds a **"&lt;zone&gt; mow
 interval"** slider (`number` entity, 0–7 days) for every zone of a
