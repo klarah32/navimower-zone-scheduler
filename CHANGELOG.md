@@ -21,6 +21,11 @@
 - Clarified the `HomeAssistantError` messages from `get_due_zones` /
   `mow_due_zones` / `save_due_schedule` to call out the startup-race case
   explicitly, for anyone still hitting it from their own automations.
+- Fixed `hassfest` CI failures: added `recorder` to `after_dependencies`
+  (it's used opportunistically for history lookups, wasn't declared
+  anywhere) and added `CONFIG_SCHEMA = cv.config_entry_only_config_schema`
+  since this integration is config-flow-only.
+- Added a `LICENSE` file (MIT) to fix the `hacs` validation license check.
 
 ## 1.3.17
 - Fixed the actual root cause of unreliable "last completed" discovery:

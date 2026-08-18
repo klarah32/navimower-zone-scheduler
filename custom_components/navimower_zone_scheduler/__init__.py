@@ -21,6 +21,7 @@ from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_SCHEDULE_ENTITY, DOMAIN
 from .service import async_register_services
@@ -28,6 +29,13 @@ from .service import async_register_services
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["number", "sensor"]
+
+# This integration is config-flow-only (added via Settings -> Devices &
+# Services, not configuration.yaml). This tells hassfest and HA itself
+# that YAML configuration for this domain isn't supported, which is what
+# the "must define CONFIG_SCHEMA/PLATFORM_SCHEMA/..." hassfest warning
+# was asking for.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _CARD_FILENAME = "navimow-zone-interval-card.js"
 _CARD_URL_BASE = "/navimower_zone_scheduler_static"
