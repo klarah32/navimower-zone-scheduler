@@ -1,6 +1,5 @@
 {
-  "name": "NaviMower Zone Scheduler"
-  "content_in_root": false,
+  "name": "NaviMower Zone Scheduler",
   "render_readme": true,
-  "homeassistant": "2026.8.1"  
+  "homeassistant": "2026.8.1"
 }
