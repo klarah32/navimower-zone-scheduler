@@ -87,7 +87,22 @@
  * own backend auto-discovery in service.py and don't see this override.
  */
 
-const CARD_VERSION = "1.3.17"
+// The integration serves this card with a `?v=<manifest version>` query
+// string on its <script type="module"> URL (see _async_register_card() in
+// __init__.py) purely so the version shown below is always read from
+// manifest.json, the single source of truth -- never hand-edited here and
+// never able to drift out of sync with the installed integration version
+// the way the old hardcoded CARD_VERSION constant could (and had).
+// `document.currentScript` doesn't work for module scripts, so this uses
+// `import.meta.url`, which is the standard way to read a module's own
+// script URL (including its query string) from inside itself.
+const CARD_VERSION = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get("v") || "dev";
+  } catch (err) {
+    return "dev";
+  }
+})();
 
 class NavimowZoneIntervalCard extends HTMLElement {
   setConfig(config) {

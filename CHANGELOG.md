@@ -1,4 +1,23 @@
 ## 1.3.18
+- Fixed a race condition in the card's static-path registration
+  (`_async_register_card`): with multiple mowers (multiple config
+  entries), Home Assistant sets those entries up concurrently, and two
+  entries could both see the card as "not yet registered" before either
+  finished awaiting registration -- so both raced to register the same
+  static path. The loser logged "Added route will never be executed,
+  method GET is already registered" and bailed out without registering
+  anything, leaving `navimow-zone-interval-card.js` genuinely unserved
+  (404s in the browser) for every entry after the first, even though the
+  card "worked" on whichever mower happened to win the race. Registration
+  is now serialized with an `asyncio.Lock`, with a re-check after the
+  lock is acquired in case another entry finished while waiting.
+- The card now reads and displays its own version from the integration's
+  `manifest.json` -- via a `?v=<version>` query string on its registered
+  script URL, parsed inside the card with `import.meta.url` -- instead of
+  a hardcoded `CARD_VERSION` constant in the JS file. The old constant
+  had already drifted out of sync with the manifest (still read
+  `"1.3.17"` as of 1.3.18-beta2); this makes that impossible going
+  forward, and doubles as a cache-buster on every version bump.
 - Fixed a startup race: on a full Home Assistant restart, this integration
   (no cloud I/O of its own) routinely finished setting up before
   `navimower`'s own cloud-backed Schedule sensor had its first update,

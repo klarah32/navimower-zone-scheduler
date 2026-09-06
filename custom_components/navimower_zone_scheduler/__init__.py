@@ -22,6 +22,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.loader import async_get_integration
 
 from .const import CONF_SCHEDULE_ENTITY, DOMAIN
 from .service import async_register_services
@@ -82,36 +83,69 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     only needs registering once) and across a HA restart (registering the
     same static path/extra JS URL twice is harmless, but we still guard it
     to keep the log quiet and avoid the frontend loading the module twice).
+
+    Multiple mowers means multiple config entries, and HA sets those up
+    concurrently -- so the registered-check-then-register section below
+    must be serialized with a lock. Without it, two entries can both read
+    "_card_registered" as False before either finishes awaiting
+    registration, and both race to register the same static path, which
+    is what threw "Added route will never be executed, method GET is
+    already registered" for every entry after the first.
+
+    The extra JS URL is registered with a `?v=<manifest version>` query
+    string -- read fresh from manifest.json via the integration loader,
+    never hand-duplicated as a separate constant -- so the version the
+    card displays (see CARD_VERSION in the JS file) can't drift out of
+    sync with the installed integration version, and so a version bump
+    also naturally busts any browser cache of the previous card JS.
     """
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("_card_registered"):
         return
 
-    www_dir = Path(__file__).parent / "www"
-    card_path = str(www_dir / _CARD_FILENAME)
+    lock = domain_data.setdefault("_card_registration_lock", asyncio.Lock())
+    async with lock:
+        # Re-check now that we hold the lock: another entry may have
+        # finished registering while we were waiting for it.
+        if domain_data.get("_card_registered"):
+            return
 
-    try:
-        # HA 2024.7+: async, list-of-StaticPathConfig.
-        from homeassistant.components.http import StaticPathConfig
+        www_dir = Path(__file__).parent / "www"
+        card_path = str(www_dir / _CARD_FILENAME)
 
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(_CARD_URL, card_path, cache_headers=False)]
-        )
-    except ImportError:
-        # Older core: sync helper, deprecated but still present.
-        hass.http.register_static_path(_CARD_URL, card_path, cache_headers=False)
-    except Exception:  # noqa: BLE001 - never let card registration block setup
-        _LOGGER.warning(
-            "Could not register the navimow-zone-interval-card static path; "
-            "add it manually under Settings -> Dashboards -> Resources -> %s",
-            _CARD_URL,
-            exc_info=True,
-        )
-        return
+        try:
+            # HA 2024.7+: async, list-of-StaticPathConfig.
+            from homeassistant.components.http import StaticPathConfig
 
-    add_extra_js_url(hass, _CARD_URL)
-    domain_data["_card_registered"] = True
-    _LOGGER.debug("Registered navimow-zone-interval-card at %s", _CARD_URL)
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(_CARD_URL, card_path, cache_headers=False)]
+            )
+        except ImportError:
+            # Older core: sync helper, deprecated but still present.
+            hass.http.register_static_path(_CARD_URL, card_path, cache_headers=False)
+        except Exception:  # noqa: BLE001 - never let card registration block setup
+            _LOGGER.warning(
+                "Could not register the navimow-zone-interval-card static path; "
+                "add it manually under Settings -> Dashboards -> Resources -> %s",
+                _CARD_URL,
+                exc_info=True,
+            )
+            return
+
+        try:
+            integration = await async_get_integration(hass, DOMAIN)
+            card_version = integration.version or "dev"
+        except Exception:  # noqa: BLE001 - a missing/unreadable version is cosmetic only
+            _LOGGER.debug(
+                "Could not read manifest version for the card; falling back to 'dev'",
+                exc_info=True,
+            )
+            card_version = "dev"
+
+        card_url = f"{_CARD_URL}?v={card_version}"
+        add_extra_js_url(hass, card_url)
+        domain_data["_card_registered"] = True
+        _LOGGER.debug("Registered navimow-zone-interval-card at %s", card_url)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
