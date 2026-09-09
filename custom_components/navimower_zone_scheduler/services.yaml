@@ -16,7 +16,8 @@ mow_due_zones:
   name: Mow due zones now
   description: >-
     Calculate today's due zones for a NaviMower Zone Scheduler schedule and
-    start mowing only those zones. Zones with interval 0 are ignored.
+    start mowing only those zones. Zones whose mow-enabled switch is off
+    are ignored.
   fields:
     schedule_entity:
       name: Schedule entity

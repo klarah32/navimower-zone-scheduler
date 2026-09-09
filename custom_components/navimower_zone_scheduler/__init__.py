@@ -1,9 +1,12 @@
 """NaviMower Zone Scheduler -- a standalone add-on integration.
 
-Adds a "<zone> mow interval" number entity per zone (auto-discovered from a
-target Schedule sensor's `zones` attribute, new zones defaulting to 0 =
-"not considered"), entirely independent of the navimower integration's own
-source. See const.py for why that separation matters.
+Adds two entities per zone (both auto-discovered from a target Schedule
+sensor's `zones` attribute): a "<zone> mow interval" number (1-7 days) and
+a "<zone> mow enabled" switch that controls whether the zone is considered
+for scheduling at all -- a brand-new zone starts disabled, same as the old
+"interval 0" default did before the switch existed. Entirely independent
+of the navimower integration's own source; see const.py for why that
+separation matters.
 
 Also self-registers its companion Lovelace card (bundled under www/) as a
 frontend resource on startup -- same "the integration owns its card, no
@@ -29,7 +32,7 @@ from .service import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["number", "sensor"]
+PLATFORMS = ["number", "sensor", "switch"]
 
 # This integration is config-flow-only (added via Settings -> Devices &
 # Services, not configuration.yaml). This tells hassfest and HA itself

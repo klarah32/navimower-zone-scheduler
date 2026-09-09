@@ -1,3 +1,41 @@
+## 1.3.19
+- Deselecting a zone's checkbox in `navimow-zone-interval-card` now greys
+  out its entire row and disables its interval slider, instead of just
+  italicizing the zone name -- the interval is meaningless while a zone
+  isn't being scheduled, so the whole row (name, age, slider, value) is
+  dimmed together and the slider can't be dragged until the zone is
+  re-enabled.
+- **Breaking change to zone participation:** a zone's mow-interval number
+  (`number.*_mow_interval`) no longer doubles as its on/off switch.
+  Setting it to `0` used to mean "not considered for scheduling" -- it now
+  only ranges **1-7 days**, and every zone gets a new, separate
+  `switch.*_mow_enabled` entity that controls whether the zone is
+  considered at all. `mow_due_zones`, `save_due_schedule`,
+  `get_due_zones`, and the `Mow Due Zones` sensor all now gate on this
+  switch instead of on `interval == 0`.
+  - **Migration:** on first load after updating, each zone's new switch
+    seeds itself from whether that zone's *old* interval was already `> 0`
+    -- so a zone you had actively scheduled keeps mowing on its existing
+    schedule without any manual step. A zone that had `0` (or no interval
+    entity at all) starts with its switch off, matching its old
+    behavior. Any interval value already at `0` is bumped up to the new
+    minimum of `1` once loaded, but stays off via its switch until you
+    turn it on.
+  - Brand-new zones added after this update default to interval `1` and
+    switch **off**, same net effect as the old "starts at 0" default.
+- The bundled `navimow-zone-interval-card` gained a checkbox in front of
+  each zone's name, wired to its new enabled switch, replacing the old
+  "drag the slider to 0" way of excluding a zone. A disabled zone's name
+  is still greyed out/italic, now driven by the switch instead of the
+  interval value. Toggling the checkbox updates the row and the 7-day
+  preview (if open) immediately, via the same local-override bridge the
+  interval slider already used for instant feedback.
+- The card's 7-day preview now labels each row with just the weekday name
+  (e.g. "Wednesday") instead of a short weekday + calendar date -- the
+  preview always covers exactly the next 7 days, so no two rows can land
+  on the same weekday and the date added nothing the weekday didn't
+  already convey.
+
 ## 1.3.18
 - Fixed a race condition in the card's static-path registration
   (`_async_register_card`): with multiple mowers (multiple config

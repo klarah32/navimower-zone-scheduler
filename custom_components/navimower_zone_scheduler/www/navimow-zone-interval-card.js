@@ -1,15 +1,18 @@
 /**
  * navimow-zone-interval-card
  *
- * One row per zone: zone name (greyed out at interval 0, highlighted green
- * when overdue for its own configured interval), how long ago it was last
+ * One row per zone: a checkbox that includes/excludes the zone from
+ * scheduling altogether -- deselecting it greys out the whole row and
+ * disables its interval slider, since the interval is meaningless while
+ * the zone isn't being scheduled -- the zone name (highlighted green when
+ * overdue for its own configured interval), how long ago it was last
  * fully completed (full-coverage finish, not just any mowing activity,
  * measured in calendar days -- "yesterday" means the calendar day before
  * today, not "less than 48 rolling hours ago"), and a slider for the
- * desired mow interval (days) -- all read from entities matched by each
- * entity's `zone_id` attribute rather than by guessing an entity_id from
- * the zone's name (so renaming a zone in the app never breaks the match).
- * This matching strategy is deliberately mirrored exactly by the
+ * desired mow interval (1-7 days) -- all read from entities matched by
+ * each entity's `zone_id` attribute rather than by guessing an entity_id
+ * from the zone's name (so renaming a zone in the app never breaks the
+ * match). This matching strategy is deliberately mirrored exactly by the
  * `navimower_zone_scheduler.mow_due_zones` / `save_due_schedule` services,
  * so the card and any automation calling those services always agree on
  * which zones are due.
@@ -44,10 +47,10 @@
  * automatically once the real entity state catches up.
  *
  * No manual helper creation needed: a brand-new zone gets its interval
- * entity automatically (defaulting to 0 = not considered) as soon as the
- * integration sees it, exactly like its "last completed" sensor. If a zone
- * somehow has no interval entity yet, its row shows a note instead of a
- * slider so nothing is silently skipped.
+ * entity (defaulting to 1 day) and its enabled switch (defaulting to off)
+ * automatically as soon as the integration sees it, exactly like its
+ * "last completed" sensor. If a zone somehow has no interval entity yet,
+ * its row shows a note instead of a slider so nothing is silently skipped.
  *
  * The zone list itself is read live from the mower's "Schedule" sensor
  * (`sensor.<mower>_schedule`), whose `zones` attribute is `[{id, name}, ...]`
@@ -207,13 +210,22 @@ class NavimowZoneIntervalCard extends HTMLElement {
         }
         .nmz-row {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) auto 90px 24px;
+          grid-template-columns: 20px minmax(0, 1fr) auto 90px 24px;
           align-items: center;
           column-gap: 8px;
           padding: 3px 0;
           border-top: 1px solid var(--divider-color, rgba(0,0,0,0.07));
         }
         .nmz-row:first-of-type { border-top: none; }
+        .nmz-row.nmz-row-off {
+          opacity: 0.5;
+        }
+        .nmz-enable {
+          width: 16px;
+          height: 16px;
+          margin: 0;
+          accent-color: var(--primary-color, #03a9f4);
+        }
         .nmz-name {
           font-size: 13px; font-weight: 500;
           color: var(--primary-text-color, #212121);
@@ -225,8 +237,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
           padding: 1px 5px;
           margin-left: -5px;
         }
-        .nmz-name.nmz-zero {
-          opacity: 0.45;
+        .nmz-name.nmz-disabled {
           font-style: italic;
         }
         .nmz-age {
@@ -243,12 +254,15 @@ class NavimowZoneIntervalCard extends HTMLElement {
           margin: 0;
           accent-color: var(--primary-color, #03a9f4);
         }
+        .nmz-slider:disabled {
+          cursor: not-allowed;
+        }
         .nmz-value {
           font-size: 11px; font-weight: 600; text-align: right;
           color: var(--primary-text-color, #212121);
         }
         .nmz-missing {
-          grid-column: 3 / span 2;
+          grid-column: 4 / span 2;
           font-size: 10px;
           color: var(--secondary-text-color, #757575);
           text-align: right;
@@ -300,7 +314,7 @@ class NavimowZoneIntervalCard extends HTMLElement {
         }
         .nmz-prev-row {
           display: grid;
-          grid-template-columns: 76px 1fr;
+          grid-template-columns: 88px 1fr;
           font-size: 12px;
           padding: 2px 0;
           column-gap: 8px;
@@ -603,6 +617,74 @@ class NavimowZoneIntervalCard extends HTMLElement {
     return byId ? byId.st : null;
   }
 
+  /** Find the "<zone> mow enabled" switch entity by its zone_id attribute,
+   *  same matching strategy as _findInterval above. Returns null if the
+   *  zone has no enabled switch yet (treated as "not enabled" everywhere
+   *  this is consulted, the same safe default a brand-new switch starts
+   *  at on the backend). */
+  /** Like _findEnabled below, but without applying the local-override
+   *  bridge -- used internally so the override logic has a single place
+   *  to apply on top of whatever the real matching found. */
+  _findEnabledRaw(zoneId, zoneName = null, scheduleEntity = null) {
+    if (!this._hass) return null;
+    const states = this._hass.states;
+    const candidates = [];
+
+    for (const eid of Object.keys(states)) {
+      if (!eid.startsWith("switch.")) continue;
+      const st = states[eid];
+      const attrs = st.attributes || {};
+      const hasEnabledName = eid.includes("mow_enabled") ||
+        String(st.name || attrs.friendly_name || "").toLowerCase().includes("mow enabled");
+      if (!hasEnabledName) continue;
+
+      const attrZoneName = attrs.zone_name != null ? String(attrs.zone_name) : "";
+      const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
+      const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
+
+      if (scheduleEntity && attrSource === scheduleEntity &&
+          zoneName != null && attrZoneName === String(zoneName)) {
+        return st;
+      }
+      candidates.push({ st, attrZoneName, attrZoneId, attrSource });
+    }
+
+    if (zoneName != null) {
+      const wanted = String(zoneName);
+      const byName = candidates.find(c => c.attrZoneName === wanted);
+      if (byName) return byName.st;
+    }
+
+    const wantedId = Number(zoneId);
+    const byId = candidates.find(c => c.attrZoneId !== null && c.attrZoneId === wantedId);
+    return byId ? byId.st : null;
+  }
+
+  /** Find the "<zone> mow enabled" switch entity by its zone_id attribute,
+   *  same matching strategy as _findInterval above. Returns null if the
+   *  zone has no enabled switch yet (treated as "not enabled" everywhere
+   *  this is consulted, the same safe default a brand-new switch starts
+   *  at on the backend).
+   *
+   *  Also consults a small local-override map, the same bridging pattern
+   *  _findInterval uses for the interval slider: the moment a checkbox
+   *  commits, its new value is recorded there so the row and the preview
+   *  reflect it immediately instead of waiting for the round trip back
+   *  from Home Assistant. */
+  _findEnabled(zoneId, zoneName = null, scheduleEntity = null) {
+    const st = this._findEnabledRaw(zoneId, zoneName, scheduleEntity);
+    const override = this._localEnabledOverrides && this._localEnabledOverrides[zoneId];
+    if (override === undefined) return st;
+    if (st && (st.state === "on") === override) {
+      // The real entity has already caught up to the override -- stop
+      // masking it so a later external change (e.g. via the entity's own
+      // more-info dialog) isn't shadowed forever.
+      delete this._localEnabledOverrides[zoneId];
+      return st;
+    }
+    return { ...(st || {}), state: override ? "on" : "off" };
+  }
+
   /** Age in *calendar* days, not rolling 24h windows. A completion at
    *  23:50 yesterday is "yesterday" even if checked 20 minutes later, and
    *  something from 47h59m ago is correctly "2 days ago" once midnight has
@@ -629,27 +711,34 @@ class NavimowZoneIntervalCard extends HTMLElement {
     const age = this._fmtAge(lm);
     const intervalState = this._findInterval(z.id, z.name, this._config.entity);
     const intervalDays = intervalState ? Number(intervalState.state) : 0;
-    // Interval 0 = "not considered" -- never flagged overdue, matching how
-    // the schedule preview/save/mow-now also skip these zones entirely.
-    const overdue = intervalDays > 0 && age.days >= intervalDays;
-    const isZero = !!intervalState && intervalDays === 0;
+    const enabledState = this._findEnabled(z.id, z.name, this._config.entity);
+    const isEnabled = !!enabledState && enabledState.state === "on";
+    // A disabled zone is never flagged overdue, matching how the schedule
+    // preview/save/mow-now also skip these zones entirely.
+    const overdue = isEnabled && intervalDays > 0 && age.days >= intervalDays;
+    const checkboxHtml = enabledState
+      ? `<input type="checkbox" class="nmz-enable" ${isEnabled ? "checked" : ""} ` +
+        `data-entity="${enabledState.entity_id}" data-zone-id="${z.id}" />`
+      : `<input type="checkbox" class="nmz-enable" disabled title="no mow-enabled entity for this zone yet" />`;
     let sliderHtml;
     if (intervalState) {
       const value = Number(intervalState.state);
       const attrs = intervalState.attributes || {};
       const min = attrs.min !== undefined ? Number(attrs.min) : 1;
-      const max = attrs.max !== undefined ? Number(attrs.max) : 30;
+      const max = attrs.max !== undefined ? Number(attrs.max) : 7;
       const step = attrs.step !== undefined ? Number(attrs.step) : 1;
       sliderHtml =
         `<input type="range" min="${min}" max="${max}" step="${step}" value="${value}" ` +
-        `data-entity="${intervalState.entity_id}" data-zone-id="${z.id}" class="nmz-slider" />` +
+        `data-entity="${intervalState.entity_id}" data-zone-id="${z.id}" class="nmz-slider" ` +
+        `${isEnabled ? "" : "disabled"} />` +
         `<span class="nmz-value">${value}d</span>`;
     } else {
       sliderHtml = `<span class="nmz-missing">no mow-interval entity for this zone yet</span>`;
     }
     return (
-      `<div class="nmz-row">` +
-      `<div class="nmz-name${overdue ? " nmz-overdue" : ""}${isZero ? " nmz-zero" : ""}">${z.name || `Zone ${z.id}`}</div>` +
+      `<div class="nmz-row${isEnabled ? "" : " nmz-row-off"}">` +
+      checkboxHtml +
+      `<div class="nmz-name${overdue ? " nmz-overdue" : ""}${!isEnabled ? " nmz-disabled" : ""}">${z.name || `Zone ${z.id}`}</div>` +
       `<div class="nmz-age">${age.text}</div>` +
       `<div class="nmz-slider-wrap">${sliderHtml}</div>` +
       `</div>`
@@ -680,9 +769,11 @@ class NavimowZoneIntervalCard extends HTMLElement {
     const lastCompletedDate = {};
 
     zones.forEach((z) => {
+      const enabledState = this._findEnabled(z.id, z.name, this._config.entity);
+      if (!enabledState || enabledState.state !== "on") return; // disabled (or missing) -> not considered
       const intervalState = this._findInterval(z.id, z.name, this._config.entity);
       const intervalDays = intervalState ? Number(intervalState.state) : 0;
-      if (!(intervalDays > 0)) return; // interval 0 (or missing) -> not considered
+      if (!(intervalDays > 0)) return; // no usable interval entity -> not considered
       const lm = this._findLastCompleted(z.id, z.name);
       let base = null;
       if (lm && !["unknown", "unavailable", ""].includes(lm.state)) {
@@ -704,8 +795,9 @@ class NavimowZoneIntervalCard extends HTMLElement {
   /** Simulate which zones would be due on each of the *following* 7 days
    *  (tomorrow .. +7), building on _computeDueToday()'s result.
    *
-   * Zones with interval 0 are excluded entirely (never scheduled from
-   * here). A zone with no completion history yet is due immediately.
+   * Disabled zones (their mow-enabled switch off, or missing) are
+   * excluded entirely (never scheduled from here). A zone with no
+   * completion history yet is due immediately.
    * A zone that's due today is only treated as "handled" (its next
    * projected due date advanced by its own interval) if it has *actually*
    * been completed today -- not just assumed, since the Mow-now button
@@ -873,6 +965,26 @@ class NavimowZoneIntervalCard extends HTMLElement {
     const rowsFocused = active && this._els.rows.contains(active) && active.tagName === "INPUT";
     if (!rowsFocused) {
       this._els.rows.innerHTML = zones.map((z) => this._rowHtml(z)).join("");
+      this._els.rows.querySelectorAll(".nmz-enable").forEach((el) => {
+        el.addEventListener("change", (e) => {
+          const entity = e.target.getAttribute("data-entity");
+          const zoneId = e.target.getAttribute("data-zone-id");
+          if (!entity) return;
+          const checked = e.target.checked;
+          this._hass.callService("switch", checked ? "turn_on" : "turn_off", {
+            entity_id: entity,
+          });
+          // Bridge the gap until hass reflects the new value (see
+          // _findEnabled's override handling), then re-render so this
+          // row's greyed-out state and the 7-day preview (if open)
+          // reflect the change immediately.
+          if (zoneId) {
+            this._localEnabledOverrides = this._localEnabledOverrides || {};
+            this._localEnabledOverrides[zoneId] = checked;
+          }
+          this._render();
+        });
+      });
       this._els.rows.querySelectorAll(".nmz-slider").forEach((el) => {
         // Live-update the number label while dragging, without hammering
         // the service call on every pixel of drag.
@@ -920,8 +1032,11 @@ class NavimowZoneIntervalCard extends HTMLElement {
     }
     this._els.previewPanel.hidden = false;
 
-    const fmtDate = (d) =>
-      d.toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "2-digit" });
+    // Weekday name only -- no calendar date -- since the preview always
+    // covers exactly the next 7 days, so no two rows can land on the same
+    // weekday and the date itself adds nothing the weekday doesn't already
+    // convey.
+    const fmtDate = (d) => d.toLocaleDateString(undefined, { weekday: "long" });
     this._els.previewRows.innerHTML = this._previewDays
       .map((day) => {
         const names = day.zoneIds.map((id) => this._previewZoneNames[id]).join(", ");
@@ -1143,5 +1258,5 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "navimow-zone-interval-card",
   name: "Navimow Zone Mow Interval",
-  description: `Per-zone slider for desired mow interval, last-completed status, a standalone Mow-now button, and a 7-day (from tomorrow) schedule preview/save -- all refreshing instantly on change. (v${CARD_VERSION})`,
+  description: `Per-zone enable checkbox and 1-7 day mow-interval slider, last-completed status, a standalone Mow-now button, and a 7-day (from tomorrow, weekday-only) schedule preview/save -- all refreshing instantly on change. (v${CARD_VERSION})`,
 });

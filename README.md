@@ -3,15 +3,17 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/klarah32/navimower-zone-scheduler?label=version)](https://github.com/klarah32/navimower-zone-scheduler/releases)
 
-Current version: **1.3.18** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
+Current version: **1.3.19** (see [CHANGELOG.md](CHANGELOG.md) for release notes).
 HACS reads this same version from `manifest.json`, so it also shows up next
 to the repo in HACS's integration list and on this repo's GitHub Releases
 page -- no separate place to keep in sync.
 
-A standalone Home Assistant integration that adds a **"&lt;zone&gt; mow
-interval"** slider (`number` entity, 0–7 days) for every zone of a
-[NaviMower](https://github.com/vahesoo/NaviMower)-managed mower, plus a
-matching dashboard card -- both bundled in this one repo/integration.
+A standalone Home Assistant integration that adds, for every zone of a
+[NaviMower](https://github.com/vahesoo/NaviMower)-managed mower, a
+**"&lt;zone&gt; mow interval"** slider (`number` entity, 1–7 days) and a
+**"&lt;zone&gt; mow enabled"** switch that controls whether the zone is
+considered for scheduling at all, plus a matching dashboard card -- both
+bundled in this one repo/integration.
 
 It is deliberately **independent** of the `navimower` integration: it never
 imports its Python code and is never touched by a NaviMower update. It only
@@ -19,16 +21,18 @@ reads the `zones` attribute off the mower's "Schedule" sensor and calls
 NaviMower's own `navimower.set_schedule` / `navimower.mow` services -- the
 same way any Home Assistant automation would.
 
-A zone's interval defaults to **0 = "not considered"** and needs no manual
-setup step: as soon as NaviMower reports a zone, its slider appears here
-automatically, at 0, ready to be raised.
+A brand-new zone's interval defaults to **1 day**, and its enabled switch
+defaults to **off**, and neither needs a manual setup step: as soon as
+NaviMower reports a zone, both entities appear here automatically, ready to
+be turned on and adjusted.
 
 ## The bundled card
 
 `navimow-zone-interval-card` (bundled under
-`custom_components/navimower_zone_scheduler/www/`) shows, per zone: name
-(greyed out at interval 0, highlighted green when overdue), how long ago it
-was last completed, and a slider for its interval. It also has:
+`custom_components/navimower_zone_scheduler/www/`) shows, per zone: a
+checkbox to include/exclude it from scheduling, its name (greyed out while
+excluded, highlighted green when overdue), how long ago it was last
+completed, and a slider for its interval. It also has:
 
 - **Preview next 6 days** -- simulates which zones would be due each day,
   respecting each zone's own interval.
@@ -114,8 +118,8 @@ automations do not need to duplicate the due-zone calculation:
   cached sensor state.
 - **`navimower_zone_scheduler.mow_due_zones`** -- calculates which zones
   are due *today* (own interval elapsed since last full completion) and
-  calls `navimower.mow` with just those zones, immediately. Zones with
-  interval 0 are never included.
+  calls `navimower.mow` with just those zones, immediately. Zones whose
+  mow-enabled switch is off are never included.
 - **`navimower_zone_scheduler.save_due_schedule`** -- simulates which
   zones would be due on each of the next 1-7 days (starting *tomorrow*,
   not today -- use `mow_due_zones` for today) and calls
@@ -186,7 +190,7 @@ The sensor also exposes diagnostic attributes:
 - `schedule_zone_count` -- number of zones currently reported by the Schedule
   sensor.
 - `interval_zone_count` -- number of schedule zones with an active mow
-  interval (`> 0`).
+  interval entity (regardless of that zone's enabled switch).
 - `completed_zone_count` -- number of eligible zones for which a valid
   `*_last_completed*` completion timestamp was found.
 
@@ -241,9 +245,10 @@ entities itself. The integration owns that logic in one place, and the
 
 ## How due-zone matching works
 
-The integration keeps the per-zone interval entities independent. For each
-configured mower, it first reads the zones from the mower's Schedule sensor
-and the corresponding `number.*_mow_interval` entities.
+The integration keeps the per-zone interval and enabled-switch entities
+independent. For each configured mower, it first reads the zones from the
+mower's Schedule sensor and the corresponding `number.*_mow_interval` and
+`switch.*_mow_enabled` entities.
 
 For completion history it finds the mower's `*_last_completed*` sensors and
 matches them to schedule zones by scoping to the mower's *device* (via the
@@ -256,8 +261,9 @@ unrelated words (like an area name) that the completion sensors' IDs never
 have -- device-scoping avoids relying on that at all. The first matching
 sensor found is used.
 
-A missing or invalid completion timestamp makes that zone due. An interval
-of `0` means the zone is not considered for mowing.
+A missing or invalid completion timestamp makes that zone due. A zone whose
+`switch.*_mow_enabled` is off is not considered for mowing at all,
+regardless of its interval.
 
 If automatic matching still picks the wrong sensor for a zone (or none at
 all -- for example if a mower has multiple completion sensors for the same
@@ -310,8 +316,8 @@ cached JS even though the backend and HACS both report the new version.
 ## Uninstalling
 
 Settings → Devices & Services → the mower entry → **⋮** → Delete, once per
-mower. This removes the entities and their stored interval values but
-leaves NaviMower itself completely untouched. Then remove via HACS (or
+mower. This removes the entities and their stored interval/enabled values
+but leaves NaviMower itself completely untouched. Then remove via HACS (or
 delete the `custom_components/navimower_zone_scheduler/` folder manually)
 and restart. Remove any dashboard cards separately -- deleting the
 integration doesn't touch your dashboards.

@@ -192,6 +192,48 @@ def _interval_entity(
     return None
 
 
+def _enabled_entity(
+    hass: HomeAssistant,
+    schedule_entity: str,
+    zone_id: int,
+    zone_name: str | None,
+) -> str | None:
+    """Find the mow-enabled switch entity for a schedule zone.
+
+    Same matching strategy as `_interval_entity` (prefer this scheduler's
+    own entity by source_entity + zone_name, then zone_name alone, then
+    fall back to zone_id) -- kept as a near-duplicate rather than a shared
+    helper so each stays simple to read on its own domain.
+    """
+    candidates: list[tuple[str, Any]] = []
+    for state in hass.states.async_all("switch"):
+        eid = state.entity_id
+        attrs = state.attributes
+        if "mow_enabled" not in eid and "mow enabled" not in str(
+            attrs.get("friendly_name", "")
+        ).lower():
+            continue
+        if attrs.get("source_entity") == schedule_entity and (
+            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
+        ):
+            return eid
+        candidates.append((eid, state))
+
+    if zone_name is not None:
+        wanted = str(zone_name)
+        for eid, state in candidates:
+            if str(state.attributes.get("zone_name", "")) == wanted:
+                return eid
+
+    for eid, state in candidates:
+        try:
+            if int(state.attributes.get("zone_id")) == zone_id:
+                return eid
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _interval_days(hass: HomeAssistant, interval_entity: str) -> float | None:
     """Read an interval entity's current value defensively.
 
@@ -351,7 +393,15 @@ async def _latest_completion(
 async def _eligible_zones(
     hass: HomeAssistant, schedule_entity: str
 ) -> tuple[dict[int, int], dict[int, date], dict[int, date | None]]:
-    """Collect zones with interval > 0, their next-due date, and last completion.
+    """Collect enabled zones, their configured interval, next-due date, and
+    last completion.
+
+    A zone counts as "eligible" only if its mow-enabled switch is on --
+    this replaces the old convention where setting the interval itself to
+    0 meant "not considered" (the interval now only ever ranges 1-7, so
+    that job moved to the switch). A zone missing its enabled switch is
+    treated as not eligible, the same safe default a brand-new zone's
+    switch starts at.
 
     Returns (interval_days_by_zone, next_due_by_zone, last_completed_by_zone).
     A zone with no completion history yet is due immediately (today), and
@@ -385,6 +435,13 @@ async def _eligible_zones(
     for row in zones:
         zone_id = _zone_id(row)
         if zone_id is None:
+            continue
+
+        enabled_entity = _enabled_entity(hass, schedule_entity, zone_id, row.get("name"))
+        if enabled_entity is None:
+            continue
+        enabled_state = hass.states.get(enabled_entity)
+        if enabled_state is None or enabled_state.state != "on":
             continue
 
         interval_entity = _interval_entity(hass, schedule_entity, zone_id, row.get("name"))

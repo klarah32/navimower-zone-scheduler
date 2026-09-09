@@ -58,7 +58,12 @@ async def async_setup_entry(
     if isinstance(cached, dict):
         for key, value in cached.items():
             try:
-                intervals[int(key)] = max(0, int(value))
+                # Clamp into the current 1-7 range even if this store still
+                # has values from before that range applied (e.g. an old
+                # "0 = not considered" entry) -- zone participation is now
+                # controlled by the separate mow-enabled switch, so an old
+                # 0 just becomes the new minimum instead of being invalid.
+                intervals[int(key)] = max(1, min(7, int(value)))
             except (TypeError, ValueError):
                 continue
 
@@ -105,14 +110,15 @@ async def async_setup_entry(
 class ZoneMowIntervalNumber(NumberEntity):
     """User-set "mow me at least every N days" preference for one zone.
 
-    Value 0 means "not considered" (matches the interval-0 = excluded
-    convention used by the navimow-zone-interval-card and any automation
-    built around it). A brand-new zone starts at 0 and is immediately
-    usable -- no setup step, no helper to create by hand.
+    Range is 1-7 days -- whether a zone participates in scheduling at all
+    is controlled separately by that zone's mow-enabled switch (see
+    switch.py), not by this value. A brand-new zone starts at 1 and is
+    immediately usable -- no setup step, no helper to create by hand --
+    but stays out of scheduling until its switch is turned on.
     """
 
     _attr_has_entity_name = True
-    _attr_native_min_value = 0
+    _attr_native_min_value = 1
     _attr_native_max_value = 7
     _attr_native_step = 1
     _attr_mode = NumberMode.SLIDER
@@ -156,7 +162,7 @@ class ZoneMowIntervalNumber(NumberEntity):
 
     @property
     def native_value(self) -> float:
-        return float(self._intervals.get(self._zone_id, 0))
+        return float(self._intervals.get(self._zone_id, 1))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -167,7 +173,7 @@ class ZoneMowIntervalNumber(NumberEntity):
         }
 
     async def async_set_native_value(self, value: float) -> None:
-        days = max(0, int(round(value)))
+        days = max(1, min(7, int(round(value))))
         self._intervals[self._zone_id] = days
         try:
             await self._store.async_save({str(k): v for k, v in self._intervals.items()})
