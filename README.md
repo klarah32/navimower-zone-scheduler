@@ -120,6 +120,12 @@ automations do not need to duplicate the due-zone calculation:
   are due *today* (own interval elapsed since last full completion) and
   calls `navimower.mow` with just those zones, immediately. Zones whose
   mow-enabled switch is off are never included.
+
+  Both actions (and the sensor's `due_zones` attribute below) list/mow
+  zones ordered by last-completion date, **oldest first** -- the zone
+  that's gone longest without being mowed comes first, and a zone that's
+  never been completed at all is treated as the most overdue of all. The
+  dashboard card's own "Mow now" button uses the same ordering.
 - **`navimower_zone_scheduler.save_due_schedule`** -- simulates which
   zones would be due on each of the next 1-7 days (starting *tomorrow*,
   not today -- use `mow_due_zones` for today) and calls
@@ -267,13 +273,34 @@ regardless of its interval.
 
 If automatic matching still picks the wrong sensor for a zone (or none at
 all -- for example if a mower has multiple completion sensors for the same
-zone name and the "first found" one isn't the right one), open the
-`navimow-zone-interval-card` in the dashboard editor and expand **Advanced
-entity overrides** -- pick the correct `*_last_completed*` sensor for that
-zone there. This only affects the card itself (its display, the Mow-now
-button, and the 7-day preview); it does not change what `mow_due_zones`,
-`save_due_schedule`, or the `Mow Due Zones` sensor use, since those still
-rely on the automatic matching described above.
+zone name and the "first found" one isn't the right one), each zone has a
+`select.<mower>_<zone>_completion_source` entity (see below) -- set it once
+and every consumer (services, sensor, card) uses the corrected sensor
+everywhere. The card's own dashboard-editor **Advanced entity overrides**
+section still exists as a lighter-weight, card-only alternative (it only
+affects that card's display, Mow-now button, and 7-day preview, and does
+not change what `mow_due_zones`, `save_due_schedule`, or the `Mow Due
+Zones` sensor use) -- prefer the select entity unless you specifically only
+want to override one dashboard's view.
+
+### Per-zone entities
+
+Alongside the `number.*_mow_interval` and `switch.*_mow_enabled` entities,
+each zone also gets:
+
+- **`button.<mower>_<zone>_mark_completed_now`** -- manually marks the zone
+  completed right now. Useful when Navimower's own completion sensor for
+  that zone is stale, disabled, or hasn't synced yet, but you know the zone
+  was just mowed. This can only set "now", never a past timestamp, and is
+  automatically superseded once Navimower's own data catches up -- pressing
+  it never permanently disconnects the zone from Navimower's reporting.
+  The zone's `*_last_completed` sensor shows a `manual` attribute (`True`
+  while a manual press is the newest value) so the card can flag it as
+  manual rather than mower-reported.
+- **`select.<mower>_<zone>_completion_source`** -- overrides which
+  `*_last_completed*` entity feeds that zone, for the rare case the
+  automatic device + zone-name match picks the wrong one (see above).
+  Defaults to "Automatic".
 
 ## Automation recommendation
 

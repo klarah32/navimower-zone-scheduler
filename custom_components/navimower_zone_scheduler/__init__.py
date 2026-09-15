@@ -12,6 +12,18 @@ Also self-registers its companion Lovelace card (bundled under www/) as a
 frontend resource on startup -- same "the integration owns its card, no
 manual dashboard-resource step" pattern as navimow_pro's own _CARDS
 registration -- so a HACS/manual install is enough on its own.
+
+The card ships as two files: a tiny registration shim
+(navimow-zone-interval-card.js), which is the only one actually wired up
+via `add_extra_js_url()` below, and the real implementation
+(navimow-zone-interval-card-impl.js), which the shim lazily loads itself
+via dynamic import() once it's already registered the custom element.
+See the shim's own header comment for why that split exists (in short:
+so the file racing against Lovelace's dashboard render at frontend
+startup is small enough to reliably win that race, and the heavy part
+gets to load -- and retry -- on its own time without that race mattering
+to Lovelace at all). Both are served as static paths here so the shim's
+import() URL resolves; only the shim needs `add_extra_js_url()`.
 """
 
 from __future__ import annotations
@@ -32,7 +44,7 @@ from .service import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["number", "sensor", "switch"]
+PLATFORMS = ["button", "number", "select", "sensor", "switch"]
 
 # This integration is config-flow-only (added via Settings -> Devices &
 # Services, not configuration.yaml). This tells hassfest and HA itself
@@ -42,8 +54,10 @@ PLATFORMS = ["number", "sensor", "switch"]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _CARD_FILENAME = "navimow-zone-interval-card.js"
+_CARD_IMPL_FILENAME = "navimow-zone-interval-card-impl.js"
 _CARD_URL_BASE = "/navimower_zone_scheduler_static"
 _CARD_URL = f"{_CARD_URL_BASE}/{_CARD_FILENAME}"
+_CARD_IMPL_URL = f"{_CARD_URL_BASE}/{_CARD_IMPL_FILENAME}"
 
 # On a full HA restart, this integration (no heavy I/O of its own) routinely
 # finishes loading before navimower's own cloud-backed sensors exist yet,
@@ -115,21 +129,29 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
         www_dir = Path(__file__).parent / "www"
         card_path = str(www_dir / _CARD_FILENAME)
+        card_impl_path = str(www_dir / _CARD_IMPL_FILENAME)
 
         try:
-            # HA 2024.7+: async, list-of-StaticPathConfig.
+            # HA 2024.7+: async, list-of-StaticPathConfig. Both files are
+            # registered in one call -- the shim needs to be reachable for
+            # add_extra_js_url() below, and the impl file needs to be
+            # reachable for the shim's own dynamic import() of it.
             from homeassistant.components.http import StaticPathConfig
 
             await hass.http.async_register_static_paths(
-                [StaticPathConfig(_CARD_URL, card_path, cache_headers=False)]
+                [
+                    StaticPathConfig(_CARD_URL, card_path, cache_headers=False),
+                    StaticPathConfig(_CARD_IMPL_URL, card_impl_path, cache_headers=False),
+                ]
             )
         except ImportError:
             # Older core: sync helper, deprecated but still present.
             hass.http.register_static_path(_CARD_URL, card_path, cache_headers=False)
+            hass.http.register_static_path(_CARD_IMPL_URL, card_impl_path, cache_headers=False)
         except Exception:  # noqa: BLE001 - never let card registration block setup
             _LOGGER.warning(
-                "Could not register the navimow-zone-interval-card static path; "
-                "add it manually under Settings -> Dashboards -> Resources -> %s",
+                "Could not register the navimow-zone-interval-card static paths; "
+                "add %s manually under Settings -> Dashboards -> Resources",
                 _CARD_URL,
                 exc_info=True,
             )

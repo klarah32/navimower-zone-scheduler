@@ -322,6 +322,56 @@ def _completion_entity_ids_for_zone(
     return sorted(matches)
 
 
+def _completed_entity(
+    hass: HomeAssistant,
+    schedule_entity: str,
+    zone_id: int,
+    zone_name: str | None,
+) -> str | None:
+    """Find this zone's own "last completed" sensor for a schedule zone.
+
+    Same matching strategy as `_interval_entity`/`_enabled_entity` (prefer
+    this scheduler's own entity by source_entity + zone_name, then
+    zone_name alone, then fall back to zone_id) -- but this looks for
+    *this integration's own* ZoneLastCompletedSensor (sensor.py), not
+    Navimower's raw entity. That sensor already did the device+zone-slug
+    matching against Navimower's raw `*_last_completed` sensors (plus any
+    Recorder fallback, plus its own "never regress" floor -- see
+    sensor.py) once, server-side; due-zone discovery reads its result
+    instead of re-deriving any of that here, so both agree by
+    construction. Returns None if that sensor doesn't exist yet (e.g.
+    right after an upgrade, before the sensor platform's zone-discovery
+    pass has run) -- callers fall back to a direct lookup in that case.
+    """
+    candidates: list[tuple[str, Any]] = []
+    for state in hass.states.async_all("sensor"):
+        eid = state.entity_id
+        attrs = state.attributes
+        if "last_completed" not in eid and "last completed" not in str(
+            attrs.get("friendly_name", "")
+        ).lower():
+            continue
+        if attrs.get("source_entity") == schedule_entity and (
+            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
+        ):
+            return eid
+        candidates.append((eid, state))
+
+    if zone_name is not None:
+        wanted = str(zone_name)
+        for eid, state in candidates:
+            if str(state.attributes.get("zone_name", "")) == wanted:
+                return eid
+
+    for eid, state in candidates:
+        try:
+            if int(state.attributes.get("zone_id")) == zone_id:
+                return eid
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _last_completed_state(
     hass: HomeAssistant, schedule_entity: str, zone_name: str | None = None
 ) -> Any | None:
@@ -372,7 +422,38 @@ def _history_last_state(hass: HomeAssistant, entity_id: str) -> Any | None:
 async def _latest_completion(
     hass: HomeAssistant, schedule_entity: str, zone_id: int, zone_name: str | None
 ) -> date | None:
-    """Return the latest completion date, including Recorder-only history."""
+    """Return the latest completion date -- preferring this integration's
+    own ZoneLastCompletedSensor (sensor.py) over re-deriving anything from
+    Navimower's raw entities directly.
+
+    That sensor already resolved device+zone-slug matching, any Recorder
+    fallback for a disabled-by-default source, a person's explicit
+    completion-source override (select.py), and its own "never regress"
+    floor -- raised either by a fresher completion or by someone pressing
+    "mark completed now" (button.py) -- once, server-side. Reading its
+    result here means `mow_due_zones`/`save_due_schedule`/the due-zones
+    sensor can never quietly disagree with what the card itself shows,
+    and pressing "mark completed now" immediately counts as done for
+    scheduling purposes too, not just cosmetically on a dashboard.
+
+    Falls back to the previous raw-Navimower matching (`_last_completed_state`
+    + Recorder history) if that sensor doesn't exist yet -- e.g. right
+    after an upgrade, before the sensor platform's zone-discovery pass has
+    had a chance to run -- or hasn't resolved anything yet (e.g. right
+    after a Home Assistant restart, before its first async_added_to_hass
+    resolve has completed).
+    """
+    completed_entity = _completed_entity(hass, schedule_entity, zone_id, zone_name)
+    if completed_entity is not None:
+        state = hass.states.get(completed_entity)
+        if state is not None and state.state not in ("unknown", "unavailable", ""):
+            parsed = dt_util.parse_datetime(state.state)
+            if parsed is not None:
+                return dt_util.as_local(parsed).date()
+        # Sensor exists but hasn't resolved a value yet -- fall through to
+        # the direct lookup below rather than treating "not yet resolved"
+        # as "never completed".
+
     state = _last_completed_state(hass, schedule_entity, zone_name)
     if state is not None and state.state not in ("unknown", "unavailable", ""):
         parsed = dt_util.parse_datetime(state.state)
@@ -476,6 +557,11 @@ async def _due_zone_details(hass: HomeAssistant, schedule_entity: str) -> dict[s
     }
     due_ids = [zid for zid, due_date in next_due.items() if due_date <= today]
     due_ids = [zid for zid in due_ids if isinstance(zid, int) and zid > 0]
+    # Oldest last_completion first -- a zone that's gone longest without
+    # being mowed is the most overdue and should be mowed/listed first.
+    # A never-completed zone (None) sorts as older than any real
+    # completion date via date.min, so it's treated as most overdue.
+    due_ids.sort(key=lambda zid: last_completed[zid] or date.min)
     due_zones = []
     for zid in due_ids:
         due_zones.append({

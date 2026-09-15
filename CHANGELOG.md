@@ -1,3 +1,89 @@
+## 1.3.19-beta3
+- New per-zone **"mark completed now" button** (`button.<mower>_<zone>_mark_completed_now`,
+  from `button.py`). Manually pins that zone's persisted completion
+  "floor" to the current time -- for the rare case Navimower's own
+  completion sensor is stale, disabled, or hasn't synced yet, and you
+  know the zone was actually just mowed. The floor only ever moves
+  forward: a manual press is superseded automatically once live/historical
+  data from Navimower catches up to (or passes) it, and the paired
+  `*_last_completed` sensor's `manual` attribute reads `True` in the
+  meantime so the card can show a "(manual)" hint instead of presenting it
+  as if it came from the mower. There's no way to set an arbitrary past
+  timestamp -- only "now" -- which is what keeps this safe to combine with
+  the floor's "never go backwards" rule without a separate bypass path.
+- New per-zone **"completion source" select**
+  (`select.<mower>_<zone>_completion_source`, from `select.py`). The
+  automatic device + zone-name-slug match that picks each zone's
+  `*_last_completed*` sensor (used by `mow_due_zones`, `get_due_zones`,
+  `save_due_schedule`, and the card) is right the overwhelming majority of
+  the time, but two zones whose names collide after slugifying -- possible
+  after a rename in the Navimower app -- can point at each other's sensor.
+  This select corrects that per zone, once, as a regular HA entity instead
+  of the card's dashboard-only "Advanced entity overrides" section, so the
+  fix follows the zone everywhere it's used (services, sensor, any
+  dashboard) rather than only the one card/dashboard it was set on.
+  Defaults to "Automatic" for every zone; only needs touching for a zone
+  that's actually colliding.
+- Split `navimow-zone-interval-card.js` into a tiny registration shim
+  (this file) and the real implementation
+  (`navimow-zone-interval-card-impl.js`, loaded lazily). Fixes the
+  intermittent native Home Assistant "Configuration error" card some
+  people saw on the Android companion app, which persisted even after
+  clearing the frontend cache and WebView data.
+  - Root cause: the card is injected via `add_extra_js_url()`, which
+    does one dynamic `import()` of the script at frontend boot, racing
+    against Lovelace trying to build the dashboard's cards. If Lovelace
+    won that race -- more likely on a slow/flaky connection or a
+    backgrounded Android WebView -- it decided the custom element didn't
+    exist and permanently swapped in its own error card, with no retry
+    once the real definition arrived and no relation to anything
+    actually cached.
+  - Fix: the file that has to win that race is now a small,
+    dependency-free shim that defines the custom element synchronously
+    the instant it runs -- easy to fetch and execute fast even on a poor
+    connection. It lazily loads the ~1300-line real implementation via
+    dynamic `import()` with automatic retries (a few attempts with
+    increasing delays, shared across every card instance on a dashboard)
+    instead of the previous single unguarded attempt, showing a small
+    "loading..." placeholder in the meantime. A load that still fails
+    after every retry shows a friendly, self-retrying inline message
+    inside the (already-registered) card element itself -- never
+    Lovelace's own unrecoverable error card again.
+  - Also guarded both `customElements.define()` calls (the shim and the
+    editor) with a `customElements.get()` check first, so a module
+    executing twice in one session (e.g. a version bump landing
+    mid-session) is a harmless no-op instead of an uncaught error.
+  - The dashboard's "Add Card" picker entry (`window.customCards`) now
+    registers from the shim instead of the impl module, so it appears
+    immediately rather than waiting on the heavier module to load.
+- `get_due_zones`, `mow_due_zones`, and the card's own standalone "Mow
+  now" button now agree on due-zone order. Previously each due-zone list
+  was in Schedule-entity zone order, and "Mow now" (which never calls
+  `mow_due_zones` -- it computes its own due list in JS and calls
+  `navimower.mow` directly) had drifted into a genuinely separate
+  algorithm from the backend's. Both now sort by last-completion date,
+  oldest first, so the most overdue zone is mowed/listed first; a zone
+  that's never been completed sorts as the most overdue of all.
+  - Backend: `_due_zone_details()` in `service.py` sorts `due_ids` once,
+    so `get_due_zones`, `mow_due_zones`, and `save_due_schedule` all
+    inherit the same order from a single place.
+  - Card: `_computeDueToday()` in `navimow-zone-interval-card-impl.js`
+    applies the identical sort to `dueToday`, so the "Mow now" button's
+    confirmation dialog and mow order now match what `get_due_zones`
+    reports for the same schedule.
+
+## 1.3.19-beta2
+- Fixed slow/stuck loading of `navimow-zone-interval-card`, especially
+  noticeable on phones. On mount, the card was fetching a full five-year
+  Recorder history (with attributes) for every zone's "last completed"
+  sensor, even for sensors that already had a perfectly good live state --
+  and, with more than one mower card on a dashboard, each card repeated
+  its own full `config/entity_registry/list` fetch in parallel. The
+  history fetch now only runs for entities that actually lack a live
+  state and drops attributes from the payload (`no_attributes: true`);
+  the entity-registry fetch is now shared and cached (15s) across all
+  card instances on a dashboard instead of being re-fetched per card.
+
 ## 1.3.19
 - Deselecting a zone's checkbox in `navimow-zone-interval-card` now greys
   out its entire row and disables its interval slider, instead of just
