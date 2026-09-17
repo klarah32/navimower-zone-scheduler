@@ -31,17 +31,25 @@ be turned on and adjusted.
 `navimow-zone-interval-card` (bundled under
 `custom_components/navimower_zone_scheduler/www/`) shows, per zone: a
 checkbox to include/exclude it from scheduling, its name (greyed out while
-excluded, highlighted green when overdue), how long ago it was last
-completed, and a slider for its interval. It also has:
+excluded, highlighted green when the backend's `get_due_zones` says it's
+overdue), how long ago it was last completed, and a slider for its
+interval. It also has:
 
-- **Preview next 6 days** -- simulates which zones would be due each day,
-  respecting each zone's own interval.
-- **Save to mower** -- writes only the days that actually have zones due,
-  via `navimower.set_schedule`, with an editable time-range and a
-  confirmation step first (since that service overwrites a whole weekday's
-  plan).
-- **Mow due zones now** -- starts mowing today's due zones immediately via
-  `navimower.mow`, without touching the recurring schedule.
+- **Preview next 7 days** -- calls `navimower_zone_scheduler.preview_due_schedule`
+  to show which zones would be due each day, the exact same calculation
+  `save_due_schedule` uses to decide what to write.
+- **Save to mower** -- re-fetches that same preview, then calls
+  `navimower_zone_scheduler.save_due_schedule` once, which writes only the
+  days that actually have zones due, after an editable time-range and a
+  confirmation step (since it overwrites a whole weekday's plan).
+- **Mow due zones now** -- calls `navimower_zone_scheduler.get_due_zones`
+  to name today's due zones in a confirmation dialog, then
+  `navimower_zone_scheduler.mow_due_zones` to start mowing them.
+
+The card has no client-side reimplementation of the due-zone calculation --
+every button above, and the row highlighting, ask the backend for the
+answer, so the card can never show or act on a different zone list than an
+automation calling the same actions would.
 
 **The integration registers the card for you** -- on setup it serves the
 bundled JS as a static path and injects it on every dashboard
@@ -276,12 +284,17 @@ all -- for example if a mower has multiple completion sensors for the same
 zone name and the "first found" one isn't the right one), each zone has a
 `select.<mower>_<zone>_completion_source` entity (see below) -- set it once
 and every consumer (services, sensor, card) uses the corrected sensor
-everywhere. The card's own dashboard-editor **Advanced entity overrides**
-section still exists as a lighter-weight, card-only alternative (it only
-affects that card's display, Mow-now button, and 7-day preview, and does
-not change what `mow_due_zones`, `save_due_schedule`, or the `Mow Due
-Zones` sensor use) -- prefer the select entity unless you specifically only
-want to override one dashboard's view.
+everywhere. This is the only override point: there is no separate
+per-card/dashboard override, so a fix here always applies everywhere this
+zone's completion data is used.
+
+Every "which zones are due" decision -- the card's row highlighting, its
+"Mow due zones now" button, its 7-day preview, the `Mow Due Zones` sensor,
+and the `get_due_zones`/`mow_due_zones`/`save_due_schedule` actions -- is
+calculated by this same backend logic. The card has no client-side
+reimplementation of it: it calls the actions above and displays their
+response, so it can never show or act on a different due-zone list than
+an automation calling those same actions would.
 
 ### Per-zone entities
 

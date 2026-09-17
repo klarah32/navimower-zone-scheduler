@@ -1,3 +1,61 @@
+## 1.3.19-beta4
+- Fixed a cross-mower entity-matching bug affecting `service.py`'s
+  `_interval_entity()`, `_enabled_entity()`, and `_completed_entity()`
+  (used by `mow_due_zones`/`save_due_schedule`/`get_due_zones`). Each
+  correctly matched by `source_entity == schedule_entity` first, but its
+  fallback path (for entities without a `source_entity` attribute yet,
+  e.g. right after an upgrade) matched by `zone_name` or `zone_id` alone
+  across *every* mower's entities, with no scoping at all. Two mowers
+  sharing a zone name (e.g. both have a "Birnbaum" zone) -- or even just
+  the same small numeric zone `id` -- could have the fallback silently
+  attach to the *other* mower's interval/enabled/completion entity.
+  All three fallbacks are now pre-scoped to `source_entity ==
+  schedule_entity` before ever considering a name/id match, so a
+  same-named or same-numbered zone on a different mower can no longer be
+  selected.
+- Applied the identical fix to the card's own JS-side lookups
+  (`_findCompletedRaw`, `_findMarkCompletedButton`, `_findInterval`,
+  `_findEnabledRaw` in `navimow-zone-interval-card-impl.js`), which had
+  the same unscoped fallback pattern.
+- Removed the card's dashboard-only **"Advanced entity overrides"**
+  editor panel and its `entity_overrides` config key entirely. It only
+  ever bypassed one card's own completion-sensor lookup and could
+  silently disagree with what the backend services/other dashboards used
+  for the same zone. The per-zone `select.<mower>_<zone>_completion_source`
+  entity (added in 1.3.19-beta3) is the one remaining way to correct an
+  automatically-matched completion sensor, and that fix now reaches every
+  card and the backend services alike -- there's no separate per-card
+  override left to fall out of sync with it.
+- **The card no longer computes "which zones are due" itself.** Previously
+  the row highlight, the "Mow due zones now" button, and the 7-day preview
+  each used their own client-side reimplementation of the due-zone
+  calculation (and "Mow now"/"Save to mower" called `navimower.mow` /
+  `navimower.set_schedule` directly with that JS-computed zone list) --
+  three separate implementations of the same logic, alongside the
+  backend's `_eligible_zones`/`_due_zone_details`/`_simulate_due_schedule`
+  in `service.py`, that could in principle disagree with each other or
+  with an automation calling the backend services. The card is now a thin
+  client over the backend:
+  - Row "overdue" highlighting is sourced from the cached response of a
+    throttled `navimower_zone_scheduler.get_due_zones` call, refreshed
+    immediately after any toggle/slider/mark-completed/mow/save action.
+  - The 7-day preview calls `navimower_zone_scheduler.preview_due_schedule`.
+  - **"Mow due zones now"** calls `get_due_zones` (to name the zones in
+    the confirmation dialog) then `navimower_zone_scheduler.mow_due_zones`
+    -- no more direct `navimower.mow` call from the card.
+  - **"Save to mower"** re-fetches `preview_due_schedule` for the
+    confirmation dialog, then calls `navimower_zone_scheduler.
+    save_due_schedule` once -- no more per-weekday `navimower.set_schedule`
+    loop from the card.
+  - There is now exactly one implementation of "which zones are due" (the
+    backend's), so the card, the due-zone sensor, and any automation
+    calling these services can no longer show or act on different zone
+    lists.
+  - Per-zone interval/enabled/last-completed *display* on each row is
+    unaffected -- those are still read directly from their own entities,
+    since they're this card editing a zone's own settings, not a due-zone
+    decision.
+
 ## 1.3.19-beta3
 - New per-zone **"mark completed now" button** (`button.<mower>_<zone>_mark_completed_now`,
   from `button.py`). Manually pins that zone's persisted completion

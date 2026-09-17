@@ -63,6 +63,13 @@ GET_DUE_SCHEMA = vol.Schema(
     }
 )
 
+PREVIEW_DUE_SCHEMA = vol.Schema(
+    {
+        vol.Required("schedule_entity"): cv.entity_id,
+        vol.Optional("days", default=7): vol.All(int, vol.Range(min=1, max=7)),
+    }
+)
+
 MOW_DUE_SCHEMA = vol.Schema(
     {
         vol.Required("schedule_entity"): cv.entity_id,
@@ -160,6 +167,12 @@ def _interval_entity(
     Prefer the scheduler's own entity (source_entity + zone_name), then
     match by zone_name, and finally fall back to zone_id for older entities.
     This avoids depending on Home Assistant's entity-id slug/collision suffix.
+
+    Every fallback below is still scoped to `source_entity == schedule_entity`
+    first -- two mowers can (and do) have same-named zones (e.g. both have a
+    "Birnbaum" zone), and zone_id collisions are even more likely since IDs
+    are small ints. Matching by name/id alone across *all* number entities
+    would silently pick the wrong mower's entity in that case.
     """
     candidates: list[tuple[str, Any]] = []
     for state in hass.states.async_all("number"):
@@ -171,9 +184,9 @@ def _interval_entity(
             continue
         if state.state in ("unknown", "unavailable", ""):
             continue
-        if attrs.get("source_entity") == schedule_entity and (
-            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
-        ):
+        if attrs.get("source_entity") != schedule_entity:
+            continue
+        if zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name):
             return eid
         candidates.append((eid, state))
 
@@ -203,7 +216,10 @@ def _enabled_entity(
     Same matching strategy as `_interval_entity` (prefer this scheduler's
     own entity by source_entity + zone_name, then zone_name alone, then
     fall back to zone_id) -- kept as a near-duplicate rather than a shared
-    helper so each stays simple to read on its own domain.
+    helper so each stays simple to read on its own domain. As in
+    `_interval_entity`, every candidate is pre-scoped to
+    `source_entity == schedule_entity` so a same-named (or same-id) zone
+    on a *different* mower can never match here.
     """
     candidates: list[tuple[str, Any]] = []
     for state in hass.states.async_all("switch"):
@@ -213,9 +229,9 @@ def _enabled_entity(
             attrs.get("friendly_name", "")
         ).lower():
             continue
-        if attrs.get("source_entity") == schedule_entity and (
-            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
-        ):
+        if attrs.get("source_entity") != schedule_entity:
+            continue
+        if zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name):
             return eid
         candidates.append((eid, state))
 
@@ -342,6 +358,10 @@ def _completed_entity(
     construction. Returns None if that sensor doesn't exist yet (e.g.
     right after an upgrade, before the sensor platform's zone-discovery
     pass has run) -- callers fall back to a direct lookup in that case.
+
+    Pre-scoped to `source_entity == schedule_entity` for the same reason as
+    `_interval_entity`/`_enabled_entity`: matching by zone_name or zone_id
+    alone could otherwise pick up another mower's same-named/same-id zone.
     """
     candidates: list[tuple[str, Any]] = []
     for state in hass.states.async_all("sensor"):
@@ -351,9 +371,9 @@ def _completed_entity(
             attrs.get("friendly_name", "")
         ).lower():
             continue
-        if attrs.get("source_entity") == schedule_entity and (
-            zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name)
-        ):
+        if attrs.get("source_entity") != schedule_entity:
+            continue
+        if zone_name is None or str(attrs.get("zone_name", "")) == str(zone_name):
             return eid
         candidates.append((eid, state))
 
@@ -636,6 +656,53 @@ async def _simulate_due_schedule(
     return schedule_by_day
 
 
+async def _preview_due_schedule_details(
+    hass: HomeAssistant, schedule_entity: str, days: int
+) -> dict[str, Any]:
+    """Read-only view of `_simulate_due_schedule`, with zone names attached.
+
+    This is the exact same calculation `save_due_schedule` uses to decide
+    what to write -- calling this first and then `save_due_schedule` (or
+    just reading this to render a preview) can never disagree, because
+    there is only one implementation. Anything that wants to *show* the
+    next `days` days of due zones (a dashboard card, a notification, an
+    automation deciding whether to bother) should call this service
+    instead of re-deriving the projection itself.
+    """
+    schedule = hass.states.get(schedule_entity)
+    if schedule is None:
+        raise HomeAssistantError(f"Schedule entity {schedule_entity!r} was not found.")
+    zones = schedule.attributes.get("zones")
+    if not isinstance(zones, list):
+        raise HomeAssistantError(
+            f"Schedule entity {schedule_entity!r} has no usable 'zones' attribute yet."
+        )
+    names_by_id = {
+        zid: str(row.get("name") or f"Zone {zid}")
+        for row in zones
+        if (zid := _zone_id(row)) is not None
+    }
+
+    schedule_by_day = await _simulate_due_schedule(hass, schedule_entity, days)
+    days_out = [
+        {
+            "date": day.isoformat(),
+            "weekday": _WEEKDAY_EN[day.weekday()],
+            "zone_ids": zone_ids,
+            "zone_names": [names_by_id.get(zid, f"Zone {zid}") for zid in zone_ids],
+        }
+        for day, zone_ids in sorted(schedule_by_day.items())
+    ]
+    return {"schedule_entity": schedule_entity, "days": days_out}
+
+
+async def async_handle_preview_due_schedule(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
+    """Return the next N days' projected due zones without saving anything."""
+    return await _preview_due_schedule_details(
+        hass, call.data["schedule_entity"], call.data["days"]
+    )
+
+
 async def async_handle_get_due_zones(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Return today's due zones without starting the mower."""
     return await _due_zone_details(hass, call.data["schedule_entity"])
@@ -735,6 +802,19 @@ def async_register_services(hass: HomeAssistant) -> None:
             "get_due_zones",
             _handle_get,
             schema=GET_DUE_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
+
+    if not hass.services.has_service("navimower_zone_scheduler", "preview_due_schedule"):
+
+        async def _handle_preview(call: ServiceCall) -> dict[str, Any]:
+            return await async_handle_preview_due_schedule(hass, call)
+
+        hass.services.async_register(
+            "navimower_zone_scheduler",
+            "preview_due_schedule",
+            _handle_preview,
+            schema=PREVIEW_DUE_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
 

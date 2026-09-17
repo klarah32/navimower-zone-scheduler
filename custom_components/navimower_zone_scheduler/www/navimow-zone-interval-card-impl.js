@@ -5,46 +5,49 @@
  * scheduling altogether -- deselecting it greys out the whole row and
  * disables its interval slider, since the interval is meaningless while
  * the zone isn't being scheduled -- the zone name (highlighted green when
- * overdue for its own configured interval), how long ago it was last
- * fully completed (full-coverage finish, not just any mowing activity,
- * measured in calendar days -- "yesterday" means the calendar day before
- * today, not "less than 48 rolling hours ago"), and a slider for the
- * desired mow interval (1-7 days) -- all read from entities matched by
- * each entity's `zone_id` attribute rather than by guessing an entity_id
- * from the zone's name (so renaming a zone in the app never breaks the
- * match). This matching strategy is deliberately mirrored exactly by the
- * `navimower_zone_scheduler.mow_due_zones` / `save_due_schedule` services,
- * so the card and any automation calling those services always agree on
- * which zones are due.
+ * today's `get_due_zones` result says this zone is overdue), how long ago
+ * it was last fully completed (full-coverage finish, not just any mowing
+ * activity, measured in calendar days -- "yesterday" means the calendar
+ * day before today, not "less than 48 rolling hours ago"), and a slider
+ * for the desired mow interval (1-7 days) -- the interval/enabled entities
+ * are read directly (matched by each entity's own `zone_id` attribute,
+ * never by guessing an entity_id from the zone's name, so renaming a zone
+ * in the app never breaks the match) since those are just this card
+ * editing this zone's own settings, not a due-zone decision.
+ *
+ * Which zones actually count as "due" -- the row highlight, the Mow-now
+ * confirm dialog, and the 7-day preview table -- is deliberately NOT
+ * computed here anymore. It's asked of the backend
+ * (`navimower_zone_scheduler.get_due_zones` / `preview_due_schedule`),
+ * the exact same calculation `mow_due_zones` / `save_due_schedule` use to
+ * decide what to actually do. There is only one implementation of "which
+ * zones are due", on the backend; this card is a thin client over it, so
+ * it can never show/act on a different list than an automation calling
+ * those services would.
  *
  * Right below the zone rows, a standalone "Mow due zones now" button
- * starts mowing today's due zones immediately (navimower.mow) -- it does
- * NOT require opening the 7-day preview first, it computes today's due
- * list fresh on click.
+ * calls `navimower_zone_scheduler.mow_due_zones` directly (after first
+ * calling the read-only `get_due_zones` to populate the confirm dialog
+ * with the zone names) -- it does NOT require opening the 7-day preview
+ * first.
  *
- * A "Preview next 7 days" button simulates which zones would be due each
- * of the *next* 7 days -- starting tomorrow, not today, since writing a
- * recurring schedule slot for "today" is pointless once part of the day
- * may already have elapsed (that's what the Mow-now button above is for).
- * A zone due today only drops out of tomorrow's projection once it's
- * *actually* been completed today -- not just assumed -- so a zone that
- * doesn't get mowed today (Mow-now skipped, failed, rained out) safely
- * carries forward into tomorrow's preview/save too, matching the backend
- * save_due_schedule service's own simulation exactly.
- * "Save to mower" always recomputes the simulation immediately before
- * saving -- so a panel left open for a while (a zone finished via the app,
- * a slider dragged on another device, etc.) can't save a stale schedule --
- * then writes only the days that actually have zones due, via
- * navimower.set_schedule, one call per weekday -- leaving days with
- * nothing due untouched, after a confirmation step listing exactly which
- * weekdays will be overwritten.
+ * A "Preview next 7 days" button calls the read-only
+ * `navimower_zone_scheduler.preview_due_schedule` service to show which
+ * zones would be due each of the *next* 7 days -- starting tomorrow, not
+ * today, since writing a recurring schedule slot for "today" is
+ * pointless once part of the day may already have elapsed (that's what
+ * the Mow-now button above is for). "Save to mower" re-fetches that same
+ * preview immediately before saving -- so a panel left open for a while
+ * (a zone finished via the app, a slider dragged on another device, etc.)
+ * can't save a stale schedule -- then calls
+ * `navimower_zone_scheduler.save_due_schedule` once, which itself writes
+ * only the days that actually have zones due, after a confirmation step
+ * listing exactly which weekdays will be overwritten.
  *
- * The preview auto-refreshes the instant you drag a zone's interval slider
- * or use Mow-now, without waiting for Home Assistant's round trip back:
- * dragging a slider records the new value in a small local-override map
- * consulted by the same zone lookup the rows AND the preview both use, so
- * the simulation reflects your edit immediately; the override is dropped
- * automatically once the real entity state catches up.
+ * The preview auto-refreshes the instant you drag a zone's interval
+ * slider, toggle its enabled switch, or use Mow-now -- but only as a
+ * fresh call to `preview_due_schedule`, not a local recomputation, so it
+ * always reflects what the backend would actually save.
  *
  * No manual helper creation needed: a brand-new zone gets its interval
  * entity (defaulting to 1 day) and its enabled switch (defaulting to off)
@@ -75,27 +78,18 @@
  *   device_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # needed to Save/Mow-now
  *   start: "09:00"                    # optional, preview/save window start
  *   end: "20:00"                      # optional, preview/save window end
- *   entity_overrides:                 # optional, see below
- *     birnbaum: sensor.garten_eltern_birnbaum_last_completed_2
  *
  * "last completed", per zone, is read directly from this integration's own
  * `sensor.*_last_completed` entities (see sensor.py's
  * ZoneLastCompletedSensor) -- matched the same synchronous, zero-WS-call
- * way as the interval/enabled entities below, via each entity's own
- * `zone_id`/`zone_name`/`source_entity` attributes. The backend entity
- * already did the device+zone-slug matching against Navimower's raw
- * `*_last_completed` sensors (plus any Recorder fallback) once,
- * server-side; this card never touches the entity registry, Recorder, or
- * a device_id itself.
- *
- * entity_overrides (optional, above) still pins a specific entity_id for
- * one zone on *this card* only, bypassing that automatic match in
- * _findCompleted() below -- useful for a one-off dashboard fix without
- * touching the backend. For a fix that should apply everywhere this zone
- * is shown, prefer that zone's "completion source" select entity instead
- * (also backed by device+zone-slug matching, see select.py); the visual
- * editor's "Advanced entity overrides" panel still writes this per-card
- * override for you.
+ * way as the interval/enabled entities, via each entity's own
+ * `zone_id`/`zone_name`/`source_entity` attributes. This is purely
+ * informational display (the "X days ago" text on a row); it never feeds
+ * into a due-zone decision. If a zone's automatically matched sensor is
+ * ever wrong (rare -- see select.py), fix it once, centrally, on that
+ * zone's "completion source" select entity -- that fix reaches every
+ * card/dashboard and the backend services alike, since there's no
+ * separate per-card override to fall out of sync with it anymore.
  */
 
 // The integration serves this card with a `?v=<manifest version>` query
@@ -428,8 +422,8 @@ class NavimowZoneIntervalCardImpl {
     };
 
     this._els.mowNowBtn.addEventListener("click", () => this._mowDueNow());
-    this._els.previewBtn.addEventListener("click", () => {
-      this._buildPreview();
+    this._els.previewBtn.addEventListener("click", async () => {
+      await this._buildPreview();
       this._renderPreview();
     });
     this._els.startInput.addEventListener("change", (e) => {
@@ -455,26 +449,16 @@ class NavimowZoneIntervalCardImpl {
    *  normal logging instead of a silent client-side dead end -- see
    *  `_completion_entity_ids_for_zone` in service.py.
    *
-   *  An optional dashboard-level override (editor's "Advanced entity
-   *  overrides" panel) still takes priority when set, same as
-   *  `_findInterval`'s local-override bridge -- useful for pinning a
-   *  specific entity on one card without touching this zone's backend
-   *  ZoneCompletionSourceSelect (which affects every card/automation). */
+   *  This is purely informational (the "last completed X days ago" text
+   *  on a row) -- it never feeds into which zones are treated as due;
+   *  that decision now always comes from the backend's due-zone/preview
+   *  services, so there is exactly one place a "wrong" match could
+   *  affect: this display. Fix it once, centrally, on that zone's
+   *  "completion source" select entity (select.py) rather than in this
+   *  card -- that fix reaches every card and the backend alike. */
   _findCompletedRaw(zoneId, zoneName = null, scheduleEntity = null) {
     if (!this._hass) return null;
     const states = this._hass.states;
-
-    const wantedName = zoneName == null ? "" : String(zoneName).trim().toLocaleLowerCase();
-    const overrideEntityId = this._overrideEntityId(wantedName);
-    if (overrideEntityId) {
-      const overrideState = states[overrideEntityId];
-      if (overrideState && !["unknown", "unavailable", ""].includes(overrideState.state)) {
-        return overrideState;
-      }
-      // No usable live state for the override -- fall through to
-      // automatic matching rather than showing "never completed" for an
-      // entity that's simply, say, briefly unavailable.
-    }
 
     const candidates = [];
     for (const eid of Object.keys(states)) {
@@ -490,16 +474,23 @@ class NavimowZoneIntervalCardImpl {
       const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
       const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
 
+      // Two mowers can have same-named (or same-id) zones -- e.g. both
+      // have a "Birnbaum" zone -- so once a schedule entity is known,
+      // every candidate below must belong to *this* mower before it's
+      // even eligible for the name/id fallback. Skipping this scoping
+      // would let a name/id match silently pick the wrong mower's entity.
+      if (scheduleEntity && attrSource !== scheduleEntity) continue;
+
       // Prefer the strongest association: this scheduler config + zone name.
-      if (scheduleEntity && attrSource === scheduleEntity &&
-          zoneName != null && attrZoneName === String(zoneName)) {
+      if (scheduleEntity && zoneName != null && attrZoneName === String(zoneName)) {
         return st;
       }
       candidates.push({ st, attrZoneName, attrZoneId });
     }
 
     // Zone name is the stable semantic association; fall back to numeric
-    // zone_id only if nothing matched by name.
+    // zone_id only if nothing matched by name. `candidates` is already
+    // scoped to this mower's schedule entity above.
     if (zoneName != null) {
       const wanted = String(zoneName);
       const byName = candidates.find((c) => c.attrZoneName === wanted);
@@ -561,8 +552,11 @@ class NavimowZoneIntervalCardImpl {
       const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
       const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
 
-      if (scheduleEntity && attrSource === scheduleEntity &&
-          zoneName != null && attrZoneName === String(zoneName)) {
+      // Same cross-mower scoping as _findCompletedRaw above -- two mowers
+      // can share a zone name (or numeric id).
+      if (scheduleEntity && attrSource !== scheduleEntity) continue;
+
+      if (scheduleEntity && zoneName != null && attrZoneName === String(zoneName)) {
         return st;
       }
       candidates.push({ st, attrZoneName, attrZoneId });
@@ -583,17 +577,6 @@ class NavimowZoneIntervalCardImpl {
   _escapeHtmlAttr(value) {
     return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
   }
-
-  /** Look up a user-configured override for a (already normalized,
-   *  lower-cased/trimmed) zone name. Returns the entity_id string, or
-   *  null if no override is set for that zone. */
-  _overrideEntityId(normalizedZoneName) {
-    if (!normalizedZoneName) return null;
-    const overrides = (this._config && this._config.entity_overrides) || {};
-    const entityId = overrides[normalizedZoneName];
-    return entityId ? String(entityId) : null;
-  }
-
 
   /** Find the "<zone> mow interval" number entity by its zone_id attribute,
    *  same matching strategy as _findCompleted above.
@@ -623,16 +606,21 @@ class NavimowZoneIntervalCardImpl {
       const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
       const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
 
+      // Two mowers can share a zone name (or numeric id) -- e.g. both have
+      // a "Birnbaum" zone -- so scope every candidate to this mower before
+      // it's eligible for the name/id fallback below.
+      if (scheduleEntity && attrSource !== scheduleEntity) continue;
+
       // Prefer the strongest association: this scheduler config + zone name.
-      if (scheduleEntity && attrSource === scheduleEntity &&
-          zoneName != null && attrZoneName === String(zoneName)) {
+      if (scheduleEntity && zoneName != null && attrZoneName === String(zoneName)) {
         return st;
       }
       candidates.push({ st, attrZoneName, attrZoneId, attrSource });
     }
 
     // Zone name is the stable semantic association used by the completion
-    // sensors; use it before falling back to numeric zone_id.
+    // sensors; use it before falling back to numeric zone_id. `candidates`
+    // is already scoped to this mower's schedule entity above.
     if (zoneName != null) {
       const wanted = String(zoneName);
       const byName = candidates.find(c => c.attrZoneName === wanted);
@@ -669,8 +657,10 @@ class NavimowZoneIntervalCardImpl {
       const attrZoneId = attrs.zone_id != null ? Number(attrs.zone_id) : null;
       const attrSource = attrs.source_entity != null ? String(attrs.source_entity) : "";
 
-      if (scheduleEntity && attrSource === scheduleEntity &&
-          zoneName != null && attrZoneName === String(zoneName)) {
+      // Same cross-mower scoping as _findInterval above.
+      if (scheduleEntity && attrSource !== scheduleEntity) continue;
+
+      if (scheduleEntity && zoneName != null && attrZoneName === String(zoneName)) {
         return st;
       }
       candidates.push({ st, attrZoneName, attrZoneId, attrSource });
@@ -742,9 +732,11 @@ class NavimowZoneIntervalCardImpl {
     const intervalDays = intervalState ? Number(intervalState.state) : 0;
     const enabledState = this._findEnabled(z.id, z.name, this._config.entity);
     const isEnabled = !!enabledState && enabledState.state === "on";
-    // A disabled zone is never flagged overdue, matching how the schedule
-    // preview/save/mow-now also skip these zones entirely.
-    const overdue = isEnabled && intervalDays > 0 && age.days >= intervalDays;
+    // Sourced from the last `get_due_zones` response (see
+    // _refreshDueToday()) -- the same calculation mow_due_zones/
+    // save_due_schedule use -- not a local recomputation. Until the first
+    // response has arrived, no row is highlighted rather than guessing.
+    const overdue = !!(this._dueZoneIds && this._dueZoneIds.has(z.id));
     const checkboxHtml = enabledState
       ? `<input type="checkbox" class="nmz-enable" ${isEnabled ? "checked" : ""} ` +
         `data-entity="${enabledState.entity_id}" data-zone-id="${z.id}" />`
@@ -788,100 +780,73 @@ class NavimowZoneIntervalCardImpl {
     return x;
   }
 
-  /** Compute today's eligible/due zones -- shared by _buildPreview() (which
-   *  continues the same nextDue map forward into the 7-day projection) and
-   *  the standalone Mow-now button (which only needs today's list and
-   *  shouldn't require the 7-day preview to have ever been opened). */
-  _computeDueToday() {
-    const stateObj = this._hass.states[this._config.entity];
-    const zones = (stateObj && stateObj.attributes && stateObj.attributes.zones) || [];
-    const today = NavimowZoneIntervalCardImpl._startOfDay(new Date());
-
-    const eligible = [];
-    const nextDue = {};
-    const nameById = {};
-    const lastCompletedDate = {};
-
-    zones.forEach((z) => {
-      const enabledState = this._findEnabled(z.id, z.name, this._config.entity);
-      if (!enabledState || enabledState.state !== "on") return; // disabled (or missing) -> not considered
-      const intervalState = this._findInterval(z.id, z.name, this._config.entity);
-      const intervalDays = intervalState ? Number(intervalState.state) : 0;
-      if (!(intervalDays > 0)) return; // no usable interval entity -> not considered
-      const lm = this._findCompleted(z.id, z.name, this._config.entity);
-      let base = null;
-      if (lm && !["unknown", "unavailable", ""].includes(lm.state)) {
-        const d = new Date(lm.state);
-        if (!Number.isNaN(d.getTime())) base = NavimowZoneIntervalCardImpl._startOfDay(d);
-      }
-      nextDue[z.id] = base
-        ? new Date(base.getTime() + intervalDays * 86400000)
-        : today; // never completed -> due today
-      lastCompletedDate[z.id] = base; // null if never completed
-      nameById[z.id] = z.name || `Zone ${z.id}`;
-      eligible.push({ id: z.id, intervalDays });
-    });
-
-    // Oldest last-completion first, matching the backend's
-    // `_due_zone_details()` ordering (service.py) -- a zone that's gone
-    // longest without being mowed (or was never completed, i.e. `null`,
-    // treated as oldest of all) is the most overdue and should be listed
-    // /mowed first. Keeps "Mow now" and the `get_due_zones` service in
-    // agreement instead of two independently-ordered implementations.
-    const dueToday = eligible
-      .filter((z) => nextDue[z.id] <= today)
-      .map((z) => z.id)
-      .sort((a, b) => {
-        const da = lastCompletedDate[a];
-        const db = lastCompletedDate[b];
-        const ta = da ? da.getTime() : -Infinity;
-        const tb = db ? db.getTime() : -Infinity;
-        return ta - tb;
-      });
-    return { today, eligible, nextDue, nameById, dueToday, lastCompletedDate };
+  /** Call one of this integration's read-only/action services for this
+   *  card's schedule entity. Every "which zones are due" answer in this
+   *  card comes through here -- there is no client-side reimplementation
+   *  of that calculation left, so the row highlight, the Mow-now button,
+   *  the 7-day preview, and Save-to-mower can never disagree with each
+   *  other or with an automation calling the same services directly. */
+  async _callDueService(service, extra = {}, returnResponse = true) {
+    const result = await this._hass.callService(
+      "navimower_zone_scheduler",
+      service,
+      { schedule_entity: this._config.entity, ...extra },
+      undefined,
+      true,
+      returnResponse
+    );
+    return returnResponse ? result && result.response : result;
   }
 
-  /** Simulate which zones would be due on each of the *following* 7 days
-   *  (tomorrow .. +7), building on _computeDueToday()'s result.
-   *
-   * Disabled zones (their mow-enabled switch off, or missing) are
-   * excluded entirely (never scheduled from here). A zone with no
-   * completion history yet is due immediately.
-   * A zone that's due today is only treated as "handled" (its next
-   * projected due date advanced by its own interval) if it has *actually*
-   * been completed today -- not just assumed, since the Mow-now button
-   * might not have been pressed yet, might fail, or the mower might get
-   * rained out. A zone that's due but not yet completed today stays due,
-   * so it naturally carries into tomorrow's projection too as a safety
-   * net -- matching save_due_schedule's backend simulation exactly, so
-   * the card's preview and what an automation actually saves always
-   * agree.
-   */
-  _buildPreview() {
-    const { today, eligible, nextDue, nameById, dueToday, lastCompletedDate } =
-      this._computeDueToday();
-
-    dueToday.forEach((zid) => {
-      const completedToday =
-        lastCompletedDate[zid] && lastCompletedDate[zid].getTime() === today.getTime();
-      if (completedToday) {
-        const z = eligible.find((e) => e.id === zid);
-        nextDue[zid] = new Date(today.getTime() + z.intervalDays * 86400000);
-      }
-      // else: leave nextDue[zid] as-is (<= today) -- it rolls forward and
-      // shows up starting with tomorrow's projection too.
-    });
-
-    const days = [];
-    for (let i = 1; i <= 7; i++) {
-      const date = new Date(today.getTime() + i * 86400000);
-      const dueIds = eligible.filter((z) => nextDue[z.id] <= date).map((z) => z.id);
-      days.push({ date, zoneIds: dueIds });
-      dueIds.forEach((zid) => {
-        const z = eligible.find((e) => e.id === zid);
-        nextDue[zid] = new Date(date.getTime() + z.intervalDays * 86400000);
-      });
+  /** Fetch today's due zones from the backend `get_due_zones` service and
+   *  cache the result for `_rowHtml()`'s overdue highlight. Coalesces
+   *  overlapping calls (e.g. several state changes arriving in a burst)
+   *  into one in-flight request, and only triggers a re-render if the due
+   *  set actually changed, so this can't loop against `_render()`. */
+  async _refreshDueToday(force = false) {
+    if (!this._hass || !this._config || this._dueTodayFetching) return;
+    // Throttle passive refreshes (e.g. triggered from every _render() call,
+    // which can fire every few seconds while the mower is active) so this
+    // doesn't hammer get_due_zones; explicit refreshes right after an
+    // action (a toggle, Mow-now, Save) pass force=true to bypass this.
+    if (!force && this._dueTodayFetchedAt && Date.now() - this._dueTodayFetchedAt < 5000) {
+      return;
     }
+    this._dueTodayFetching = true;
+    try {
+      const details = await this._callDueService("get_due_zones");
+      const ids = new Set((details && details.zone_ids) || []);
+      const changed =
+        !this._dueZoneIds ||
+        ids.size !== this._dueZoneIds.size ||
+        [...ids].some((id) => !this._dueZoneIds.has(id));
+      this._dueZoneIds = ids;
+      this._dueTodayFetchedAt = Date.now();
+      if (changed) this._render();
+    } catch (err) {
+      // Leave the previous (possibly stale) highlight in place rather than
+      // clearing it on a transient error -- a blip shouldn't make every
+      // row suddenly look "not due".
+    } finally {
+      this._dueTodayFetching = false;
+    }
+  }
+
+  /** Fetch the next-7-days projection from the backend `preview_due_schedule`
+   *  service -- the exact same calculation `save_due_schedule` uses to
+   *  decide what to write, so the preview table can never show something
+   *  different from what "Save to mower" would actually save. */
+  async _buildPreview() {
+    const details = await this._callDueService("preview_due_schedule", { days: 7 });
+    const daysOut = (details && details.days) || [];
+    const nameById = {};
+    const days = daysOut.map((d) => {
+      const [y, m, day] = d.date.split("-").map(Number);
+      d.zone_ids.forEach((id, i) => {
+        nameById[id] = d.zone_names[i];
+      });
+      return { date: new Date(y, m - 1, day), zoneIds: d.zone_ids };
+    });
 
     this._previewDays = days;
     this._previewZoneNames = nameById;
@@ -909,7 +874,7 @@ class NavimowZoneIntervalCardImpl {
     // clicked. _buildPreview() preserves any start/end time the user has
     // already edited in the panel (see its "only seeded on a fresh..."
     // comment), so this doesn't clobber that.
-    this._buildPreview();
+    await this._buildPreview();
     this._renderPreview();
 
     const daysWithZones = (this._previewDays || []).filter((d) => d.zoneIds.length > 0);
@@ -930,19 +895,21 @@ class NavimowZoneIntervalCardImpl {
     this._previewStatus = "Saving\u2026";
     this._renderPreview();
     try {
-      for (const day of daysWithZones) {
-        await this._hass.callService("navimower", "set_schedule", {
-          device_id: this._config.device_id,
-          day: NavimowZoneIntervalCardImpl.WEEKDAY_EN[day.date.getDay()],
-          enabled: true,
-          periods: [{ start, end, zones: day.zoneIds }],
-        });
-      }
+      // The single navimower_zone_scheduler.save_due_schedule call below
+      // re-simulates and writes every due day itself -- this is the same
+      // service an automation would call, so there's no separate
+      // per-weekday navimower.set_schedule loop here to drift from it.
+      await this._callDueService(
+        "save_due_schedule",
+        { device_id: this._config.device_id, start, end, days: 7 },
+        false
+      );
       this._previewStatus = `Saved ${daysWithZones.length} day(s) to the mower.`;
     } catch (err) {
       this._previewStatus = `Failed: ${(err && err.message) || err}`;
     }
     this._renderPreview();
+    this._refreshDueToday(true);
   }
 
   async _mowDueNow() {
@@ -951,30 +918,42 @@ class NavimowZoneIntervalCardImpl {
         "Set 'device_id' in the card config first (Settings \u2192 Devices \u2192 open the mower \u2192 copy its ID).";
       return;
     }
-    const { dueToday, nameById } = this._computeDueToday();
-    if (!dueToday.length) {
+    let details;
+    try {
+      details = await this._callDueService("get_due_zones");
+    } catch (err) {
+      this._els.mowNowStatus.textContent = `Failed: ${(err && err.message) || err}`;
+      return;
+    }
+    const dueZones = (details && details.due_zones) || [];
+    if (!dueZones.length) {
       this._els.mowNowStatus.textContent = "Nothing due today.";
       return;
     }
-    const names = dueToday.map((id) => nameById[id]).join(", ");
+    const names = dueZones.map((z) => z.name).join(", ");
     const confirmed = window.confirm(`Start mowing now: ${names}?`);
     if (!confirmed) return;
 
     this._els.mowNowStatus.textContent = "Starting\u2026";
     try {
-      await this._hass.callService("navimower", "mow", {
-        device_id: this._config.device_id,
-        zones: dueToday,
-        reset: false,
-      });
+      // navimower_zone_scheduler.mow_due_zones recomputes today's due list
+      // itself (rather than trusting the list gathered a moment ago for
+      // the confirm dialog above), so a zone completed via the app in the
+      // meantime can't get mowed twice.
+      await this._callDueService(
+        "mow_due_zones",
+        { device_id: this._config.device_id, reset: false },
+        false
+      );
       this._els.mowNowStatus.textContent = `Mowing started: ${names}.`;
     } catch (err) {
       this._els.mowNowStatus.textContent = `Failed: ${(err && err.message) || err}`;
     }
-    // "Due today" fed into day 1's carry-forward assumption in the 7-day
-    // preview -- refresh it too, if it's currently open.
+    // "Due today" feeds into day 1's carry-forward assumption in the 7-day
+    // preview -- refresh both it (if open) and the row highlight.
+    this._refreshDueToday(true);
     if (this._previewDays) {
-      this._buildPreview();
+      await this._buildPreview();
       this._renderPreview();
     }
   }
@@ -986,6 +965,12 @@ class NavimowZoneIntervalCardImpl {
    *  panel's permanent nodes -- see _renderPreview(). */
   _render() {
     if (!this._hass || !this._config || !this._els) return;
+
+    // Passive, throttled refresh of the backend's due-zone list so row
+    // highlighting stays current even without an explicit action; see
+    // _refreshDueToday()'s own throttle for why this is safe to call on
+    // every render.
+    this._refreshDueToday();
 
     this._els.title.textContent = this._config.title || "";
     this._els.title.style.display = this._config.title ? "" : "none";
@@ -1009,23 +994,29 @@ class NavimowZoneIntervalCardImpl {
     if (!rowsFocused) {
       this._els.rows.innerHTML = zones.map((z) => this._rowHtml(z)).join("");
       this._els.rows.querySelectorAll(".nmz-enable").forEach((el) => {
-        el.addEventListener("change", (e) => {
+        el.addEventListener("change", async (e) => {
           const entity = e.target.getAttribute("data-entity");
           const zoneId = e.target.getAttribute("data-zone-id");
           if (!entity) return;
           const checked = e.target.checked;
-          this._hass.callService("switch", checked ? "turn_on" : "turn_off", {
+          await this._hass.callService("switch", checked ? "turn_on" : "turn_off", {
             entity_id: entity,
           });
           // Bridge the gap until hass reflects the new value (see
           // _findEnabled's override handling), then re-render so this
-          // row's greyed-out state and the 7-day preview (if open)
-          // reflect the change immediately.
+          // row's greyed-out state reflects the change immediately, and
+          // refresh due-status/preview from the backend now that the
+          // switch has actually landed.
           if (zoneId) {
             this._localEnabledOverrides = this._localEnabledOverrides || {};
             this._localEnabledOverrides[zoneId] = checked;
           }
           this._render();
+          this._refreshDueToday(true);
+          if (this._previewDays) {
+            await this._buildPreview();
+            this._renderPreview();
+          }
         });
       });
       this._els.rows.querySelectorAll(".nmz-slider").forEach((el) => {
@@ -1037,34 +1028,36 @@ class NavimowZoneIntervalCardImpl {
           if (label) label.textContent = `${e.target.value}d`;
         });
         // Commit to Home Assistant only once the drag/click is released.
-        el.addEventListener("change", (e) => {
+        el.addEventListener("change", async (e) => {
           const entity = e.target.getAttribute("data-entity");
           const zoneId = e.target.getAttribute("data-zone-id");
           const value = Number(e.target.value);
-          this._hass.callService("number", "set_value", { entity_id: entity, value });
+          await this._hass.callService("number", "set_value", { entity_id: entity, value });
           // Bridge the gap until hass reflects the new value (see
-          // _findInterval's override handling), then refresh the 7-day
-          // preview immediately if it's open, rather than leaving it
-          // showing a schedule computed from the old interval.
+          // _findInterval's override handling) for this row's own display;
+          // the due-zone refresh below is awaited until after the service
+          // call above resolves, so it's never asking the backend before
+          // the new interval has actually landed.
           if (zoneId) {
             this._localOverrides = this._localOverrides || {};
             this._localOverrides[zoneId] = value;
           }
+          this._refreshDueToday(true);
           if (this._previewDays) {
-            this._buildPreview();
+            await this._buildPreview();
             this._renderPreview();
           }
         });
       });
       this._els.rows.querySelectorAll(".nmz-age-clickable").forEach((el) => {
-        el.addEventListener("click", (e) => {
+        el.addEventListener("click", async (e) => {
           const entity = e.currentTarget.getAttribute("data-mark-entity");
           const zoneId = e.currentTarget.getAttribute("data-zone-id");
           const zoneName = e.currentTarget.getAttribute("data-zone-name") || `Zone ${zoneId}`;
           if (!entity) return;
           const confirmed = window.confirm(`Mark "${zoneName}" as completed now?`);
           if (!confirmed) return;
-          this._hass.callService("button", "press", { entity_id: entity });
+          await this._hass.callService("button", "press", { entity_id: entity });
           // Bridge the gap until the backend's floor write + the mirrored
           // completion sensor both catch up (see _findCompleted's
           // override handling), so the row shows "today" immediately
@@ -1074,8 +1067,9 @@ class NavimowZoneIntervalCardImpl {
             this._localCompletedOverrides[zoneId] = Date.now();
           }
           this._render();
+          this._refreshDueToday(true);
           if (this._previewDays) {
-            this._buildPreview();
+            await this._buildPreview();
             this._renderPreview();
           }
         });
@@ -1132,25 +1126,17 @@ class NavimowZoneIntervalCardImpl {
 // (opening a card's visual editor) well after this module has already
 // loaded, so it isn't exposed to the startup race the card itself was.
 
-/** Minimal ha-form based visual editor.
- *
- * In addition to the static fields (entity/title/device_id/start/end),
- * this builds one extra, *dynamic* schema entry per zone found on the
- * currently configured Schedule sensor, nested inside a collapsible
- * "Advanced entity overrides" expansion panel (HA's built-in `expandable`
- * form-schema type -- collapsed by default, so it stays out of the way
- * unless someone actually needs it). Each field is an entity picker that
- * lets the user pin a specific "last completed" sensor for that zone,
- * overriding this card's own automatic device+zone-slug discovery (see
- * `_findCompleted` / `_overrideEntityId` on the card class above) --
- * useful for a one-off dashboard fix. For a fix that should apply
- * everywhere this zone is shown, prefer that zone's backend "completion
- * source" select entity instead (select.py) rather than hand-editing
- * YAML here.
- *
- * The panel's data lands in `config.entity_overrides`, keyed by each
- * zone's name (trimmed, lower-cased -- see `_zoneKey`), matching exactly
- * how the card's own `_overrideEntityId` looks the value up.
+/** Minimal ha-form based visual editor for the static fields
+ *  (entity/title/device_id/start/end). No more per-zone entity-override
+ *  schema here -- see the card class doc comment for why: every "which
+ *  zone is due" decision now comes from the backend services (single
+ *  implementation, single source of truth), so a per-card "last
+ *  completed" override would have nothing left to feed into and would
+ *  only risk the display disagreeing with what Mow-now/Save-to-mower
+ *  actually do. A zone whose auto-matched completion sensor is wrong
+ *  should be fixed once, centrally, on that zone's "completion source"
+ *  select entity (select.py) -- that fix reaches this card, every other
+ *  dashboard, and the backend services alike.
  */
 class NavimowZoneIntervalCardEditor extends HTMLElement {
   setConfig(config) {
@@ -1160,125 +1146,15 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._form) return;
-    this._form.hass = hass;
-    // Re-derive the per-zone override schema when the set of zones on the
-    // configured Schedule sensor actually changes (new mower selected, a
-    // zone added/removed/renamed on the mower) -- not on every single
-    // hass push, which would otherwise reassign `.schema` every few
-    // seconds while a mower is active and risk disrupting an in-progress
-    // entity-picker interaction.
-    const signature = this._zoneSignature();
-    if (signature !== this._lastZoneSignature) {
-      this._lastZoneSignature = signature;
-      this._form.schema = this._computeSchema();
-    }
+    if (this._form) this._form.hass = hass;
   }
 
   connectedCallback() {
     this._render();
   }
 
-  _zones() {
-    const entity = this._config && this._config.entity;
-    const stateObj = entity && this._hass && this._hass.states[entity];
-    const zones = (stateObj && stateObj.attributes && stateObj.attributes.zones) || [];
-    return zones.filter((z) => z && z.name);
-  }
-
-  _zoneSignature() {
-    return this._zones().map((z) => z.name).join("|");
-  }
-
-  _zoneKey(name) {
-    return String(name == null ? "" : name).trim().toLocaleLowerCase();
-  }
-
-  /** Best-effort preview of what the card would auto-detect for a zone
-   *  right now, shown as helper text so the user can judge whether an
-   *  override is actually necessary. Mirrors the card's own fallback
-   *  live-state scan (zone-slug + "_last_completed" suffix, first match
-   *  alphabetically) -- the editor has no cheap way to also scope by
-   *  device the way the card does once its registry fetch resolves, so
-   *  this is intentionally just a hint, not authoritative. */
-  _autoDetectedEntityId(zoneName) {
-    if (!this._hass) return null;
-    const zoneSlug = String(zoneName == null ? "" : zoneName)
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLocaleLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "");
-    if (!zoneSlug) return null;
-    const escaped = zoneSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`_${escaped}_last_completed(?:_\\d+)?$`);
-    const states = this._hass.states;
-    const matches = Object.keys(states)
-      .filter((eid) => eid.startsWith("sensor.") && pattern.test(eid))
-      .sort();
-    return matches[0] || null;
-  }
-
-  _computeSchema() {
-    const zones = this._zones();
-    this._zoneLabelByKey = {};
-    const overrideSchema = zones.map((z) => {
-      const key = this._zoneKey(z.name);
-      this._zoneLabelByKey[key] = z.name;
-      return { name: key, selector: { entity: { domain: "sensor" } } };
-    });
-
-    const schema = [...NavimowZoneIntervalCardEditor.BASE_SCHEMA];
-    if (overrideSchema.length) {
-      schema.push({
-        name: "entity_overrides",
-        type: "expandable",
-        title: "Advanced entity overrides",
-        icon: "mdi:tune",
-        schema: overrideSchema,
-      });
-    }
-    return schema;
-  }
-
   _computeLabel(schema) {
-    if (schema.name === "entity_overrides") return "Advanced entity overrides";
-    if (this._zoneLabelByKey && Object.prototype.hasOwnProperty.call(this._zoneLabelByKey, schema.name)) {
-      return `${this._zoneLabelByKey[schema.name]} \u2013 last completed sensor`;
-    }
     return NavimowZoneIntervalCardEditor.LABELS[schema.name] || schema.name;
-  }
-
-  _computeHelper(schema) {
-    if (schema.name === "entity_overrides") {
-      return (
-        "Only needed if a zone's automatically matched \u201clast completed\u201d sensor " +
-        "is missing or unreliable. Leave a zone blank to keep automatic discovery."
-      );
-    }
-    if (this._zoneLabelByKey && Object.prototype.hasOwnProperty.call(this._zoneLabelByKey, schema.name)) {
-      const auto = this._autoDetectedEntityId(this._zoneLabelByKey[schema.name]);
-      return auto ? `Auto-detected: ${auto}` : "No sensor auto-detected for this zone yet.";
-    }
-    return undefined;
-  }
-
-  /** Drop empty/cleared override entries so config stays tidy instead of
-   *  accumulating `{"birnbaum": ""}` clutter, and drop the whole
-   *  `entity_overrides` key once nothing is left in it. */
-  _pruneEmptyOverrides(config) {
-    if (!config || !config.entity_overrides) return config;
-    const cleaned = {};
-    for (const [key, value] of Object.entries(config.entity_overrides)) {
-      if (value) cleaned[key] = value;
-    }
-    const next = { ...config };
-    if (Object.keys(cleaned).length) {
-      next.entity_overrides = cleaned;
-    } else {
-      delete next.entity_overrides;
-    }
-    return next;
   }
 
   _render() {
@@ -1287,10 +1163,9 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
       this.innerHTML = `<ha-form></ha-form>`;
       this._form = this.querySelector("ha-form");
       this._form.computeLabel = (schema) => this._computeLabel(schema);
-      this._form.computeHelper = (schema) => this._computeHelper(schema);
       this._form.addEventListener("value-changed", (ev) => {
         ev.stopPropagation();
-        this._config = this._pruneEmptyOverrides(ev.detail.value);
+        this._config = ev.detail.value;
         this.dispatchEvent(
           new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true })
         );
@@ -1298,8 +1173,7 @@ class NavimowZoneIntervalCardEditor extends HTMLElement {
     }
     if (this._hass) this._form.hass = this._hass;
     this._form.data = this._config;
-    this._lastZoneSignature = this._zoneSignature();
-    this._form.schema = this._computeSchema();
+    this._form.schema = NavimowZoneIntervalCardEditor.BASE_SCHEMA;
   }
 }
 
